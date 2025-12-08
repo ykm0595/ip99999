@@ -5,7 +5,7 @@ permissions:
 
 on:
   schedule:
-    - cron: "0 18 * * *"
+    - cron: "0 18 * * *"     # 每天自动运行
   workflow_dispatch:
 
 jobs:
@@ -19,17 +19,27 @@ jobs:
       - name: Fetch CloudFlareYes API (Your Workers Proxy)
         run: |
           mkdir -p /dev/shm/cfscan
-          curl -s https://8899.059566.xyz/ > /dev/shm/cfscan/api.json
+          echo "正在从你的 Workers 获取 JSON..."
+          curl -s https://8899.059566.xyz/ -o /dev/shm/cfscan/api.json
+
+          echo "API 内容预览（前 10 行）："
+          head -n 10 /dev/shm/cfscan/api.json || true
 
       - name: Extract IP list
         run: |
-          jq -r '.data[].ip' /dev/shm/cfscan/api.json | sort -u > /dev/shm/cfscan/ip_list.txt
+          echo "开始解析 JSON..."
+          jq -r '.data[].ip' /dev/shm/cfscan/api.json | sort -u > /dev/shm/cfscan/ip_list.txt || true
+
           echo "提取到 $(wc -l < /dev/shm/cfscan/ip_list.txt) 个 IP"
+          echo "前 10 个 IP："
+          head -n 10 /dev/shm/cfscan/ip_list.txt || true
 
       - name: Scan IPs (800 并发)
         run: |
           result="/dev/shm/cfscan/result_raw.txt"
           echo "" > $result
+
+          echo "开始测速..."
 
           cat /dev/shm/cfscan/ip_list.txt | xargs -n 1 -P 800 -I {} sh -c '
             ip="{}"
@@ -37,32 +47,31 @@ jobs:
             # 节点检测
             colo=$(curl -s --max-time 0.2 --resolve speed.cloudflare.com:80:$ip \
               http://speed.cloudflare.com/cdn-cgi/trace | grep "^colo=" | cut -d= -f2)
+
             [ -z "$colo" ] && exit 0
 
             # 延迟检测
             latency=$(curl -o /dev/null -s --max-time 0.2 \
               --resolve speed.cloudflare.com:80:$ip \
               -w "%{time_connect}" http://speed.cloudflare.com/cdn-cgi/trace)
+
             latency_ms=$(echo "$latency*1000" | bc 2>/dev/null)
             [ -z "$latency_ms" ] && latency_ms="9999"
 
             # 延迟过滤
-            if (( $(echo "$latency_ms >= 200" | bc -l) )); then
-              exit 0
-            fi
+            if (( $(echo "$latency_ms >= 200" | bc -l) )); then exit 0; fi
 
             # 丢包检测
             loss=$(ping -c 3 -W 1 $ip 2>/dev/null | grep "packet loss" | awk -F% "{print \$1}" | awk "{print \$NF}")
             [ -z "$loss" ] && loss=100
-            if (( $(echo "$loss > 50" | bc -l) )); then
-              exit 0
-            fi
+            if (( $(echo "$loss > 50" | bc -l) )); then exit 0; fi
 
             # 速度测试（512KB）
             speed_bytes=$(curl -o /dev/null -s --max-time 0.5 \
               --resolve speed.cloudflare.com:80:$ip \
               -w "%{speed_download}" \
               "http://speed.cloudflare.com/__down?bytes=524288")
+
             speed_mb=$(echo "$speed_bytes/1024/1024" | bc 2>/dev/null)
             [ -z "$speed_mb" ] && speed_mb="0"
 
@@ -75,16 +84,16 @@ jobs:
         run: |
           result="/dev/shm/cfscan/result_raw.txt"
 
-          # TXT
+          echo "生成 TXT..."
           sort -k4 -nr $result | head -n 50 | awk \
             "{print \$1\"#\"\$2\"#\"\$3\"ms#\"\$4\"MB/s#loss=\"\$5\"#\"\$6}" \
             > cf_fast_top50.txt
 
-          # CSV
+          echo "生成 CSV..."
           echo "ip,colo,latency_ms,speed_mb,loss,isp" > cf_fast_top50.csv
           sort -k4 -nr $result | head -n 50 >> cf_fast_top50.csv
 
-          # JSON
+          echo "生成 JSON..."
           sort -k4 -nr $result | head -n 50 | awk '
             BEGIN { print "[" }
             {
@@ -103,4 +112,6 @@ jobs:
             git add cf_fast_top50.txt cf_fast_top50.csv cf_fast_top50.json
             git commit -m "Update CloudFlareYes Scan"
             git push
+          else
+            echo "没有变化，无需提交。"
           fi
