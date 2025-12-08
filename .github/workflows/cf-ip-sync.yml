@@ -1,0 +1,33 @@
+name: Sync Cloudflare IPs
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # 每10分钟执行
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Fetch Cloudflare HTML
+        run: |
+          curl -s https://api.uouin.com/cloudflare.html -o page.html
+
+      - name: Extract IPs
+        run: |
+          # 提取 IPv4 地址
+          grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' page.html | sort -u > cf_ips.txt
+
+      - name: Commit changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git config --local user.email "actions@github.com"
+            git config --local user.name "GitHub Actions"
+            git add cf_ips.txt
+            git commit -m "Update Cloudflare IP list"
+            git push
+          fi
