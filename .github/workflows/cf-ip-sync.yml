@@ -1,16 +1,15 @@
-name: Sync Cloudflare IPs
+name: Cloudflare-HK-IPs
 
 permissions:
   contents: write
 
 on:
   schedule:
-    # 每天北京时间凌晨2点（UTC 18:00）
-    - cron: "0 18 * * *"
+    - cron: "0 18 * * *"   # 北京时间凌晨2点
   workflow_dispatch:
 
 jobs:
-  fetch:
+  hk:
     runs-on: ubuntu-latest
 
     steps:
@@ -25,5 +24,26 @@ jobs:
         run: |
           grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' page.html | sort -u > raw_ips.txt
 
-      - name: Detect geolocation and generate output
+      - name: Detect HK colo
         run: |
+          echo "" > hk_ips.txt
+
+          while read ip; do
+            # 请求 Cloudflare trace
+            colo=$(curl -s --max-time 2 "https://${ip}/cdn-cgi/trace" | grep '^colo=' | cut -d= -f2)
+
+            # 如果是香港节点
+            if [ "$colo" = "HKG" ]; then
+              echo "${ip}#HK" >> hk_ips.txt
+            fi
+          done < raw_ips.txt
+
+      - name: Commit changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git config --local user.email "actions@github.com"
+            git config --local user.name "GitHub Actions"
+            git add hk_ips.txt
+            git commit -m "Update Cloudflare Hong Kong IP list"
+            git push
+          fi
