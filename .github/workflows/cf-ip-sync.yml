@@ -30,7 +30,7 @@ jobs:
 
       - name: Start WARP (proxy mode)
         run: |
-          sudo warp-cli --accept-tos register
+          sudo warp-cli --accept-tos registration new
           sudo warp-cli set-mode proxy
           sudo warp-cli set-proxy-port 40000
           sudo warp-cli connect
