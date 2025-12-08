@@ -22,21 +22,32 @@ jobs:
           sudo apt-get install -y prips wireguard-tools jq bc iputils-ping
 
       #######################################################################
-      # ✅ 防呆版 wgcf 安装（自动 fallback，不会再出现 null）
+      # ✅ 防呆版 wgcf 安装（HTTP code 检查 + assets 防空）
       #######################################################################
       - name: Install wgcf (robust)
         run: |
-          WGCF_URL=$(curl -s https://api.github.com/repos/ViRb3/wgcf/releases \
-            | jq -r '
-              map(.assets // []) |
-              flatten |
-              map(select(.name | contains("linux_amd64"))) |
-              first |
-              .browser_download_url // empty
-            ')
+          echo "===> Fetching wgcf releases..."
+          RAW=$(curl -s -w "\n%{http_code}" https://api.github.com/repos/ViRb3/wgcf/releases)
+          BODY=$(echo "$RAW" | sed '$d')
+          CODE=$(echo "$RAW" | tail -n1)
+
+          if [ "$CODE" -ne 200 ]; then
+            echo "❌ GitHub API error: $CODE"
+            echo "$BODY"
+            exit 1
+          fi
+
+          WGCF_URL=$(echo "$BODY" | jq -r '
+            map(.assets // []) |
+            flatten |
+            map(select(.name | test("linux.*amd64"; "i"))) |
+            first |
+            .browser_download_url // empty
+          ')
 
           if [ -z "$WGCF_URL" ]; then
-            echo "❌ ERROR: Failed to fetch wgcf download URL"
+            echo "❌ wgcf linux_amd64 asset not found"
+            echo "$BODY" | head -n 40
             exit 1
           fi
 
@@ -46,21 +57,32 @@ jobs:
           sudo mv wgcf /usr/local/bin/
 
       #######################################################################
-      # ✅ 防呆版 wireproxy 安装（自动识别正确文件）
+      # ✅ 防呆版 wireproxy 安装（assets 防空 + 正则匹配）
       #######################################################################
       - name: Install wireproxy (robust)
         run: |
-          WIREPROXY_URL=$(curl -s https://api.github.com/repos/whyvl/wireproxy/releases \
-            | jq -r '
-              map(.assets // []) |
-              flatten |
-              map(select(.name | contains("linux-amd64"))) |
-              first |
-              .browser_download_url // empty
-            ')
+          echo "===> Fetching wireproxy releases..."
+          RAW=$(curl -s -w "\n%{http_code}" https://api.github.com/repos/whyvl/wireproxy/releases)
+          BODY=$(echo "$RAW" | sed '$d')
+          CODE=$(echo "$RAW" | tail -n1)
+
+          if [ "$CODE" -ne 200 ]; then
+            echo "❌ GitHub API error: $CODE"
+            echo "$BODY"
+            exit 1
+          fi
+
+          WIREPROXY_URL=$(echo "$BODY" | jq -r '
+            map(.assets // []) |
+            flatten |
+            map(select(.name | test("linux.*amd64"; "i"))) |
+            first |
+            .browser_download_url // empty
+          ')
 
           if [ -z "$WIREPROXY_URL" ]; then
-            echo "❌ ERROR: Failed to fetch wireproxy download URL"
+            echo "❌ wireproxy linux_amd64 asset not found"
+            echo "$BODY" | head -n 40
             exit 1
           fi
 
@@ -70,10 +92,12 @@ jobs:
           sudo mv wireproxy /usr/local/bin/
 
       #######################################################################
-      # ✅ WARP 启动 + 自检（确保 socks5 真的可用）
+      # ✅ WARP 启动 + socks5 强制自检（不通过直接 exit）
       #######################################################################
       - name: Setup WARP SOCKS5
         run: |
+          set -e
+
           wgcf register --accept-tos
           wgcf generate
 
@@ -99,15 +123,17 @@ EOF
 
           export ALL_PROXY="socks5://127.0.0.1:40000"
 
-          echo "✅ Testing WARP connectivity..."
-          if ! curl -s --max-time 3 https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
-            echo "❌ ERROR: WARP did not start correctly"
+          echo "===> Testing WARP..."
+          if ! curl -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
+            echo "❌ ERROR: WARP socks5 proxy is NOT working"
+            curl -v --max-time 5 https://www.cloudflare.com/cdn-cgi/trace || true
             exit 1
           fi
+
           echo "✅ WARP is working"
 
       #######################################################################
-      # ✅ 加载旧 IP（防呆）
+      # ✅ 加载旧 IP
       #######################################################################
       - name: Load previous valid IPs
         run: |
@@ -133,7 +159,7 @@ EOF
 EOF
 
       #######################################################################
-      # ✅ 构建 IP 列表（防呆）
+      # ✅ 构建 IP 列表
       #######################################################################
       - name: Build IP list
         run: |
@@ -183,7 +209,7 @@ EOF
           '
 
       #######################################################################
-      # ✅ 排序 + Top20（防呆）
+      # ✅ 排序 + Top20
       #######################################################################
       - name: Sort + Top20
         run: |
@@ -192,7 +218,7 @@ EOF
           awk '{print $1"#"toupper($2)}' valid_ips_full.txt > valid_ips.txt
 
       #######################################################################
-      # ✅ stats（防空文件）
+      # ✅ stats
       #######################################################################
       - name: Generate stats
         run: |
@@ -208,7 +234,7 @@ EOF
           echo "ICN：$icn" >> stats.txt
 
       #######################################################################
-      # ✅ history（防呆）
+      # ✅ history
       #######################################################################
       - name: Save history
         run: |
