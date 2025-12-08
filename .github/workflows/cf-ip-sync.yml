@@ -1,4 +1,4 @@
-name: Cloudflare-IP-Scanner
+name: Cloudflare-Region-Scanner
 
 permissions:
   contents: write
@@ -16,27 +16,43 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Fetch Cloudflare IPv4 ranges
+      - name: Prepare region CIDRs (HKG / ICN / NRT)
         run: |
           mkdir -p /dev/shm/cfscan
-          curl -s https://www.cloudflare.com/ips-v4 -o /dev/shm/cfscan/ips_v4.txt
+          cat <<EOF > /dev/shm/cfscan/cidrs.txt
+          # Hong Kong
+          104.16.0.0/13
+          104.24.0.0/14
+          172.64.0.0/15
 
-          echo "=== Cloudflare IPv4 段 ==="
-          cat /dev/shm/cfscan/ips_v4.txt
+          # Japan
+          141.101.64.0/18
+          188.114.96.0/20
+          198.41.128.0/17
 
-      - name: Expand IPv4 ranges to single IPs
+          # Korea
+          162.158.0.0/16
+          172.68.0.0/14
+          EOF
+
+          echo "=== 扫描 CIDR 列表 ==="
+          cat /dev/shm/cfscan/cidrs.txt
+
+      - name: Expand CIDRs to IP list
         run: |
           echo "开始展开 IP 段..."
           > /dev/shm/cfscan/ip_list.txt
 
           while read cidr; do
+            [[ "$cidr" =~ ^# ]] && continue
+            [[ -z "$cidr" ]] && continue
+
             ipcalc -n $cidr | grep Network | awk '{print $2}' > /dev/shm/cfscan/net.txt
             ipcalc -b $cidr | grep Broadcast | awk '{print $2}' > /dev/shm/cfscan/bc.txt
 
             net=$(cat /dev/shm/cfscan/net.txt)
             bc=$(cat /dev/shm/cfscan/bc.txt)
 
-            # 转换为整数
             IFS=. read -r n1 n2 n3 n4 <<< "$net"
             IFS=. read -r b1 b2 b3 b4 <<< "$bc"
 
@@ -47,7 +63,7 @@ jobs:
               ip="$(( (i>>24)&255 )).$(( (i>>16)&255 )).$(( (i>>8)&255 )).$(( i&255 ))"
               echo $ip >> /dev/shm/cfscan/ip_list.txt
             done
-          done < /dev/shm/cfscan/ips_v4.txt
+          done < /dev/shm/cfscan/cidrs.txt
 
           echo "展开完成，共 $(wc -l < /dev/shm/cfscan/ip_list.txt) 个 IP"
           head -n 20 /dev/shm/cfscan/ip_list.txt
@@ -62,12 +78,10 @@ jobs:
           cat /dev/shm/cfscan/ip_list.txt | xargs -n 1 -P 800 -I {} sh -c '
             ip="{}"
 
-            # 节点检测
             colo=$(curl -s --max-time 0.2 --resolve speed.cloudflare.com:80:$ip \
               http://speed.cloudflare.com/cdn-cgi/trace | grep "^colo=" | cut -d= -f2)
             [ -z "$colo" ] && exit 0
 
-            # 延迟检测
             latency=$(curl -o /dev/null -s --max-time 0.2 \
               --resolve speed.cloudflare.com:80:$ip \
               -w "%{time_connect}" http://speed.cloudflare.com/cdn-cgi/trace)
@@ -76,12 +90,10 @@ jobs:
 
             if (( $(echo "$latency_ms >= 200" | bc -l) )); then exit 0; fi
 
-            # 丢包检测
             loss=$(ping -c 3 -W 1 $ip 2>/dev/null | grep "packet loss" | awk -F% "{print \$1}" | awk "{print \$NF}")
             [ -z "$loss" ] && loss=100
             if (( $(echo "$loss > 50" | bc -l) )); then exit 0; fi
 
-            # 速度测试（512KB）
             speed_bytes=$(curl -o /dev/null -s --max-time 0.5 \
               --resolve speed.cloudflare.com:80:$ip \
               -w "%{speed_download}" \
@@ -106,16 +118,13 @@ jobs:
             exit 0
           fi
 
-          echo "生成 TXT..."
           sort -k4 -nr $result | head -n 50 | awk \
             "{print \$1\"#\"\$2\"#\"\$3\"ms#\"\$4\"MB/s#loss=\"\$5\"#\"\$6}" \
             > cf_fast_top50.txt
 
-          echo "生成 CSV..."
           echo "ip,colo,latency_ms,speed_mb,loss,isp" > cf_fast_top50.csv
           sort -k4 -nr $result | head -n 50 >> cf_fast_top50.csv
 
-          echo "生成 JSON..."
           sort -k4 -nr $result | head -n 50 | awk '
             BEGIN { print "[" }
             {
@@ -132,7 +141,7 @@ jobs:
             git config --local user.email "actions@github.com"
             git config --local user.name "GitHub Actions"
             git add cf_fast_top50.txt cf_fast_top50.csv cf_fast_top50.json
-            git commit -m "Update Cloudflare Scan"
+            git commit -m "Update Region Scan"
             git push
           else
             echo "没有变化，无需提交。"
