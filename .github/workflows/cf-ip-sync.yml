@@ -5,8 +5,7 @@ permissions:
 
 on:
   schedule:
-    # 每天北京时间凌晨2点（UTC 18:00）
-    - cron: "0 18 * * *"
+    - cron: "0 18 * * *"   # 北京时间凌晨2点
   workflow_dispatch:
 
 jobs:
@@ -17,46 +16,29 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # ✅ 固定抓取 uouin 的 Cloudflare IP 列表
       - name: Fetch Cloudflare HTML
         run: |
           curl -s https://api.uouin.com/cloudflare.html -o page.html
 
       - name: Extract IPs
         run: |
-          grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' page.html | sort -u > raw_ips.txt
+          grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' page.html \
+            | sort -u > raw_ips.txt
 
+      # ✅ 扫描 + 节点检测 + 延迟 + 速度（方案 A）
       - name: Scan IPs and generate cf_all.txt
         run: |
           echo "" > cf_all.txt
 
           while read ip; do
-            echo "正在检测 $ip"
+            echo "检测 $ip"
 
-            # ✅ 获取实际节点（colo）
-            colo=$(curl -s --max-time 2 --resolve speed.cloudflare.com:80:${ip} "http://speed.cloudflare.com/cdn-cgi/trace" | grep '^colo=' | cut -d= -f2)
+            # 获取实际节点（colo）
+            colo=$(curl -s --max-time 2 --resolve speed.cloudflare.com:80:${ip} \
+              "http://speed.cloudflare.com/cdn-cgi/trace" \
+              | grep '^colo=' | cut -d= -f2)
             [ -z "$colo" ] && colo="UN"
 
-            # ✅ 延迟：使用 curl time_connect（比 ping 更可靠）
-            latency=$(curl -o /dev/null -s --max-time 3 --resolve speed.cloudflare.com:80:${ip} -w "%{time_connect}" "http://speed.cloudflare.com/cdn-cgi/trace")
-            latency_ms=$(echo "scale=2; $latency*1000" | bc 2>/dev/null)
-            [ -z "$latency_ms" ] && latency_ms="0"
-
-            # ✅ 下载速度（MB/s）：下载 10MB 文件
-            speed_bytes=$(curl -o /dev/null -s --max-time 5 --resolve speed.cloudflare.com:80:${ip} -w "%{speed_download}" "http://speed.cloudflare.com/__down?bytes=10000000")
-            speed_mb=$(echo "scale=2; $speed_bytes/1024/1024" | bc 2>/dev/null)
-            [ -z "$speed_mb" ] && speed_mb="0"
-
-            # ✅ 输出格式：IP#节点#延迟#速度
-            echo "${ip}#${colo}#${latency_ms}ms#${speed_mb}MB/s" >> cf_all.txt
-
-          done < raw_ips.txt
-
-      - name: Commit changes
-        run: |
-          if [ -n "$(git status --porcelain)" ]; then
-            git config --local user.email "actions@github.com"
-            git config --local user.name "GitHub Actions"
-            git add cf_all.txt
-            git commit -m "Update Cloudflare enhanced IP list"
-            git push
-          fi
+            # 延迟（curl time_connect）
+            latency=$(curl -o /dev/null -s --max-time 3 \
