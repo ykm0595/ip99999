@@ -1,11 +1,11 @@
-name: Cloudflare-Fast-Scanner
+name: Cloudflare-Ultimate-Fast-Scanner
 
 permissions:
   contents: write
 
 on:
   schedule:
-    - cron: "0 18 * * *"   # 北京时间凌晨2点
+    - cron: "0 18 * * *"
   workflow_dispatch:
 
 jobs:
@@ -18,72 +18,50 @@ jobs:
 
       - name: Generate IP list (162.159.x.x + 172.64.x.x)
         run: |
-          echo "" > ip_list.txt
+          mkdir -p /dev/shm/cfscan
+          ipfile="/dev/shm/cfscan/ip_list.txt"
+          echo "" > $ipfile
 
           # 162.159.0.0/16
           for i in {0..255}; do
             for j in {0..255}; do
-              echo "162.159.$i.$j" >> ip_list.txt
+              echo "162.159.$i.$j" >> $ipfile
             done
           done
 
           # 172.64.0.0/16
           for i in {0..255}; do
             for j in {0..255}; do
-              echo "172.64.$i.$j" >> ip_list.txt
+              echo "172.64.$i.$j" >> $ipfile
             done
           done
 
-      - name: Scan IPs (20 并发) 并生成结果
+      - name: Scan IPs (2000 并发 · 终极优化)
         run: |
-          echo "" > result_raw.txt
+          result="/dev/shm/cfscan/result_raw.txt"
+          echo "" > $result
 
           scan_ip() {
             ip=$1
 
-            # 获取节点
-            colo=$(curl -s --max-time 2 --resolve speed.cloudflare.com:80:$ip \
+            # 超快节点检测（0.2 秒）
+            colo=$(curl -s --max-time 0.2 --resolve speed.cloudflare.com:80:$ip \
               http://speed.cloudflare.com/cdn-cgi/trace | grep '^colo=' | cut -d= -f2)
-            [ -z "$colo" ] && colo="UN"
 
-            # 延迟
-            latency=$(curl -o /dev/null -s --max-time 3 \
+            [ -z "$colo" ] && return 0
+
+            # 超快延迟检测（0.2 秒）
+            latency=$(curl -o /dev/null -s --max-time 0.2 \
               --resolve speed.cloudflare.com:80:$ip \
               -w "%{time_connect}" http://speed.cloudflare.com/cdn-cgi/trace)
+
             latency_ms=$(echo "$latency*1000" | bc 2>/dev/null)
             [ -z "$latency_ms" ] && latency_ms="9999"
 
-            # 下载速度（10MB）
-            speed_bytes=$(curl -o /dev/null -s --max-time 5 \
+            # 极速测速（512KB 文件 · 0.5 秒）
+            speed_bytes=$(curl -o /dev/null -s --max-time 0.5 \
               --resolve speed.cloudflare.com:80:$ip \
               -w "%{speed_download}" \
-              "http://speed.cloudflare.com/__down?bytes=10000000")
-            speed_mb=$(echo "$speed_bytes/1024/1024" | bc 2>/dev/null)
-            [ -z "$speed_mb" ] && speed_mb="0"
+              "http://speed.cloudflare.com/__down?bytes=524288")
 
-            echo "$ip $colo $latency_ms $speed_mb" >> result_raw.txt
-          }
-
-          export -f scan_ip
-
-          # 20 并发扫描
-          cat ip_list.txt | xargs -n 1 -P 20 bash -c 'scan_ip "$@"' _
-
-      - name: Sort and output TOP 50
-        run: |
-          echo "" > cf_fast_top50.txt
-
-          # 按速度排序（倒序）
-          sort -k4 -nr result_raw.txt | head -n 50 | while read ip colo latency speed; do
-            echo "$ip#$colo#${latency}ms#${speed}MB/s" >> cf_fast_top50.txt
-          done
-
-      - name: Commit changes
-        run: |
-          if [ -n "$(git status --porcelain)" ]; then
-            git config --local user.email "actions@github.com"
-            git config --local user.name "GitHub Actions"
-            git add cf_fast_top50.txt
-            git commit -m "Update Cloudflare Fast TOP50"
-            git push
-          fi
+            speed_mb=$(echo
