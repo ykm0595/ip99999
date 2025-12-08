@@ -23,64 +23,24 @@ jobs:
 
       - name: Install wgcf (robust)
         run: |
-          echo "===> Fetching wgcf releases..."
           RAW=$(curl -s -w "\n%{http_code}" https://api.github.com/repos/ViRb3/wgcf/releases)
           BODY=$(echo "$RAW" | sed '$d')
           CODE=$(echo "$RAW" | tail -n1)
-
-          if [ "$CODE" -ne 200 ]; then
-            echo "GitHub API error for wgcf: $CODE"
-            echo "$BODY"
-            exit 1
-          fi
-
-          WGCF_URL=$(echo "$BODY" | jq -r '
-            map(.assets // []) |
-            flatten |
-            map(select(.name | test("linux.*amd64"; "i"))) |
-            first |
-            .browser_download_url // empty
-          ')
-
-          if [ -z "$WGCF_URL" ]; then
-            echo "wgcf linux_amd64 asset not found"
-            echo "$BODY" | head -n 40
-            exit 1
-          fi
-
-          echo "WGCF URL: $WGCF_URL"
+          if [ "$CODE" -ne 200 ]; then echo "WGCF API error"; exit 1; fi
+          WGCF_URL=$(echo "$BODY" | jq -r 'map(.assets // []) | flatten | map(select(.name | test("linux.*amd64";"i"))) | first | .browser_download_url // empty')
+          if [ -z "$WGCF_URL" ]; then echo "WGCF asset missing"; exit 1; fi
           wget -O wgcf "$WGCF_URL"
           chmod +x wgcf
           sudo mv wgcf /usr/local/bin/
 
       - name: Install wireproxy (robust)
         run: |
-          echo "===> Fetching wireproxy releases..."
           RAW=$(curl -s -w "\n%{http_code}" https://api.github.com/repos/whyvl/wireproxy/releases)
           BODY=$(echo "$RAW" | sed '$d')
           CODE=$(echo "$RAW" | tail -n1)
-
-          if [ "$CODE" -ne 200 ]; then
-            echo "GitHub API error for wireproxy: $CODE"
-            echo "$BODY"
-            exit 1
-          fi
-
-          WIREPROXY_URL=$(echo "$BODY" | jq -r '
-            map(.assets // []) |
-            flatten |
-            map(select(.name | test("linux.*amd64"; "i"))) |
-            first |
-            .browser_download_url // empty
-          ')
-
-          if [ -z "$WIREPROXY_URL" ]; then
-            echo "wireproxy linux_amd64 asset not found"
-            echo "$BODY" | head -n 40
-            exit 1
-          fi
-
-          echo "Wireproxy URL: $WIREPROXY_URL"
+          if [ "$CODE" -ne 200 ]; then echo "Wireproxy API error"; exit 1; fi
+          WIREPROXY_URL=$(echo "$BODY" | jq -r 'map(.assets // []) | flatten | map(select(.name | test("linux.*amd64";"i"))) | first | .browser_download_url // empty')
+          if [ -z "$WIREPROXY_URL" ]; then echo "Wireproxy asset missing"; exit 1; fi
           wget -O wireproxy "$WIREPROXY_URL"
           chmod +x wireproxy
           sudo mv wireproxy /usr/local/bin/
@@ -88,45 +48,29 @@ jobs:
       - name: Setup WARP SOCKS5
         run: |
           set -e
-
           wgcf register --accept-tos
           wgcf generate
-
           PRIVATE_KEY=$(grep PrivateKey wgcf-profile.conf | head -n1 | awk '{print $3}')
           PUBLIC_KEY=$(grep PublicKey wgcf-profile.conf | head -n1 | awk '{print $3}')
-
           echo "[Interface]" > warp.conf
           echo "PrivateKey = $PRIVATE_KEY" >> warp.conf
           echo "Address = 172.16.0.2/32" >> warp.conf
-          echo "" >> warp.conf
           echo "[Peer]" >> warp.conf
           echo "PublicKey = $PUBLIC_KEY" >> warp.conf
           echo "AllowedIPs = 0.0.0.0/0" >> warp.conf
           echo "Endpoint = engage.cloudflareclient.com:2408" >> warp.conf
-          echo "" >> warp.conf
           echo "[Socks5]" >> warp.conf
           echo "BindAddress = 127.0.0.1:40000" >> warp.conf
-
           nohup wireproxy -c warp.conf >/dev/null 2>&1 &
           sleep 5
-
           export ALL_PROXY="socks5://127.0.0.1:40000"
-
-          echo "Testing WARP..."
           if ! curl -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
-            echo "ERROR: WARP socks5 proxy is NOT working"
-            curl -v --max-time 5 https://www.cloudflare.com/cdn-cgi/trace || true
-            exit 1
-          fi
-
-          echo "WARP is working"
+            echo "WARP failed"; exit 1; fi
 
       - name: Load previous valid IPs
         run: |
           mkdir -p /dev/shm/cfscan
-          if [ -f valid_ips.txt ]; then
-            cp valid_ips.txt /dev/shm/cfscan/valid_old.txt
-          fi
+          if [ -f valid_ips.txt ]; then cp valid_ips.txt /dev/shm/cfscan/valid_old.txt; fi
 
       - name: Prepare CIDRs
         run: |
@@ -142,44 +86,29 @@ jobs:
       - name: Build IP list
         run: |
           > /dev/shm/cfscan/ip_list.txt
-
           if [ -f /dev/shm/cfscan/valid_old.txt ]; then
             cut -d '#' -f1 /dev/shm/cfscan/valid_old.txt | shuf -n 2000 >> /dev/shm/cfscan/ip_list.txt
           else
-            while read cidr; do
-              prips "$cidr" | shuf -n 2048 >> /dev/shm/cfscan/ip_list.txt
-            done < /dev/shm/cfscan/cidrs.txt
+            while read cidr; do prips "$cidr" | shuf -n 2048 >> /dev/shm/cfscan/ip_list.txt; done < /dev/shm/cfscan/cidrs.txt
           fi
 
       - name: Scan IPs
         run: |
           result="/dev/shm/cfscan/result_raw.txt"
           : > "$result"
-
           export ALL_PROXY="socks5://127.0.0.1:40000"
-
           cat /dev/shm/cfscan/ip_list.txt | xargs -n 1 -P 200 -I {} bash -c '
             ip="{}"
-
             trace=$(curl -s --max-time 1 --resolve speed.cloudflare.com:80:$ip http://speed.cloudflare.com/cdn-cgi/trace)
             colo=$(echo "$trace" | grep "^colo=" | cut -d= -f2)
             [ -z "$colo" ] && exit 0
-
-            latency=$(curl -o /dev/null -s --max-time 1 \
-              --resolve speed.cloudflare.com:80:$ip \
-              -w "%{time_connect}" http://speed.cloudflare.com/cdn-cgi/trace)
+            latency=$(curl -o /dev/null -s --max-time 1 --resolve speed.cloudflare.com:80:$ip -w "%{time_connect}" http://speed.cloudflare.com/cdn-cgi/trace)
             latency_ms=$(echo "$latency*1000" | bc)
             [ -z "$latency_ms" ] && latency_ms=9999
-
             if (( $(echo "$latency_ms >= 200" | bc -l) )); then exit 0; fi
-
-            speed_bytes=$(curl -o /dev/null -s --max-time 1 \
-              --resolve speed.cloudflare.com:80:$ip \
-              -w "%{speed_download}" \
-              "http://speed.cloudflare.com/__down?bytes=524288")
+            speed_bytes=$(curl -o /dev/null -s --max-time 1 --resolve speed.cloudflare.com:80:$ip -w "%{speed_download}" "http://speed.cloudflare.com/__down?bytes=524288")
             speed_mb=$(echo "$speed_bytes/1024/1024" | bc)
             [ -z "$speed_mb" ] && speed_mb=0
-
             echo "$ip $colo $latency_ms $speed_mb" >> "'"$result"'"
           '
 
@@ -195,7 +124,6 @@ jobs:
           hkg=$(grep -i " hkg " valid_ips_full.txt | wc -l)
           nrt=$(grep -i " nrt " valid_ips_full.txt | wc -l)
           icn=$(grep -i " icn " valid_ips_full.txt | wc -l)
-
           echo "日期：$(date -u)" > stats.txt
           echo "有效 IP：$total" >> stats.txt
           echo "HKG：$hkg" >> stats.txt
@@ -206,12 +134,7 @@ jobs:
         run: |
           mkdir -p history
           ts=$(date -u +"%Y-%m-%d")
-          jq -n \
-            --arg date "$(date -u)" \
-            --arg total "$(wc -l < valid_ips_full.txt)" \
-            --argjson top20 "$(jq -R -s -c 'split("\n")[:-1]' top20.txt)" \
-            '{date:$date,total:$total,top20:$top20}' \
-            > history/$ts.json
+          jq -n --arg date "$(date -u)" --arg total "$(wc -l < valid_ips_full.txt)" --argjson top20 "$(jq -R -s -c 'split("\n")[:-1]' top20.txt)" '{date:$date,total:$total,top20:$top20}' > history/$ts.json
 
       - name: Commit changes
         run: |
