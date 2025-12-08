@@ -16,10 +16,10 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Fetch CloudFlareYes API (Mirror)
+      - name: Fetch CloudFlareYes API (GitHub Actions 专用代理)
         run: |
           mkdir -p /dev/shm/cfscan
-          curl -s https://cfyes.vercel.app/api > /dev/shm/cfscan/api.json
+          curl -s https://cfy-proxy.vercel.app/api > /dev/shm/cfscan/api.json
 
       - name: Extract IP list
         run: |
