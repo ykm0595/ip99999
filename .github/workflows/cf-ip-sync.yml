@@ -25,31 +25,29 @@ jobs:
         run: |
           grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' page.html | sort -u > raw_ips.txt
 
-           - name: Scan IPs and generate cf_all.txt
+      - name: Scan IPs and generate cf_all.txt
         run: |
           echo "" > cf_all.txt
 
           while read ip; do
             echo "正在检测 $ip"
 
-            # 获取实际节点（colo）
+            # 获取实际节点（colo） - 使用 HTTP 避免 SSL 错误
             colo=$(curl -s --max-time 2 "http://${ip}/cdn-cgi/trace" | grep '^colo=' | cut -d= -f2)
             [ -z "$colo" ] && colo="UN"
 
-            # 获取延迟（Cloudflare 常常屏蔽 ping，所以改用 curl time_connect）
+            # 延迟：使用 curl time_connect（比 ping 更可靠）
             latency=$(curl -o /dev/null -s --max-time 3 -w "%{time_connect}" "http://${ip}/cdn-cgi/trace")
             latency_ms=$(echo "scale=2; $latency*1000" | bc 2>/dev/null)
             [ -z "$latency_ms" ] && latency_ms="0"
 
-            # 获取下载速度（MB/s） - 下载 10MB 文件
+            # 下载速度（MB/s）：下载 10MB 文件
             speed_bytes=$(curl -o /dev/null -s --max-time 5 -w "%{speed_download}" "http://${ip}/__down?bytes=10000000")
             speed_mb=$(echo "scale=2; $speed_bytes/1024/1024" | bc 2>/dev/null)
             [ -z "$speed_mb" ] && speed_mb="0"
 
+            # 输出格式：IP#节点#延迟#速度
             echo "${ip}#${colo}#${latency_ms}ms#${speed_mb}MB/s" >> cf_all.txt
-
-          done < raw_ips.txt
-
 
           done < raw_ips.txt
 
