@@ -5,7 +5,7 @@ permissions:
 
 on:
   schedule:
-    - cron: "0 18 * * *"     # 每天自动抓取 + 扫描
+    - cron: "0 18 * * *"
   workflow_dispatch:
 
 jobs:
@@ -16,10 +16,10 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Fetch CloudFlareYes API
+      - name: Fetch CloudFlareYes API (Mirror)
         run: |
           mkdir -p /dev/shm/cfscan
-          curl -s https://stock.hostmonit.com/api/CloudFlareYes > /dev/shm/cfscan/api.json
+          curl -s https://cfyes.vercel.app/api > /dev/shm/cfscan/api.json
 
       - name: Extract IP list
         run: |
