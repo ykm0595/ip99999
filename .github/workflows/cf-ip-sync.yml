@@ -6,22 +6,17 @@
           PRIVATE_KEY=$(grep PrivateKey wgcf-profile.conf | head -n1 | awk '{print $3}')
           PUBLIC_KEY=$(grep PublicKey wgcf-profile.conf | head -n1 | awk '{print $3}')
 
-          cat > warp.conf <<'EOF'
-[Interface]
-PrivateKey = REPLACE_PRIVATE_KEY
-Address = 172.16.0.2/32
+          # 用 base64 写入 warp.conf，避免 YAML 解析 [Interface] 报错
+          cat > warp.conf.b64 <<'EOF'
+W0ludGVyZmFjZV0KUFJJVkFURV9LRVkKQWRkcmVzcyA9IDE3Mi4xNi4wLjIvMzIKCltQZWVyXQpQVUJMSUNfS0VZCkFsbG93ZWRJcHMgPSAwLjAuMC4wLzAKRW5kcG9pbnQgPSBlbmdhZ2UuY2xvdWRmbGFyZWNsaWVudC5jb206MjQwOAoKW1NvY2tzNV0KQmluZEFkZHJlc3MgPSAxMjcuMC4wLjE6NDAwMDAKEOF
 
-[Peer]
-PublicKey = REPLACE_PUBLIC_KEY
-AllowedIPs = 0.0.0.0/0
-Endpoint = engage.cloudflareclient.com:2408
+          # 解码
+          base64 -d warp.conf.b64 > warp.conf
 
-[Socks5]
-BindAddress = 127.0.0.1:40000
-EOF
+          # 替换占位符
+          sed -i "s/PRIVATE_KEY/$PRIVATE_KEY/" warp.conf
+          sed -i "s/PUBLIC_KEY/$PUBLIC_KEY/" warp.conf
 
-          sed -i "s/REPLACE_PRIVATE_KEY/$PRIVATE_KEY/" warp.conf
-          sed -i "s/REPLACE_PUBLIC_KEY/$PUBLIC_KEY/" warp.conf
-
+          # 启动 wireproxy
           nohup wireproxy -c warp.conf >/dev/null 2>&1 &
           sleep 5
