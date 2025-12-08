@@ -1,4 +1,4 @@
-name: Cloudflare-Region-Scanner
+name: Cloudflare-Region-Random-Scanner
 
 permissions:
   contents: write
@@ -43,19 +43,20 @@ jobs:
           echo "=== 扫描 CIDR 列表 ==="
           cat /dev/shm/cfscan/cidrs.txt
 
-      - name: Expand CIDRs using prips
+      - name: Expand & Random Sample IPs
         run: |
-          echo "开始展开 IP 段..."
+          echo "开始展开并随机抽样 IP..."
           > /dev/shm/cfscan/ip_list.txt
 
           while read cidr; do
             [[ "$cidr" =~ ^# ]] && continue
             [[ -z "$cidr" ]] && continue
 
-            prips $cidr >> /dev/shm/cfscan/ip_list.txt
+            # 展开 CIDR → 随机抽样 2048 个 IP
+            prips $cidr | shuf -n 2048 >> /dev/shm/cfscan/ip_list.txt
           done < /dev/shm/cfscan/cidrs.txt
 
-          echo "展开完成，共 $(wc -l < /dev/shm/cfscan/ip_list.txt) 个 IP"
+          echo "抽样完成，共 $(wc -l < /dev/shm/cfscan/ip_list.txt) 个 IP"
           head -n 20 /dev/shm/cfscan/ip_list.txt
 
       - name: Scan IPs (800 并发)
@@ -127,11 +128,11 @@ jobs:
 
       - name: Commit changes
         run: |
-          if [ -n "$(git status --porcelain)" ]; then
+          if [ -n "$(git.status --porcelain)" ]; then
             git config --local user.email "actions@github.com"
             git config --local user.name "GitHub Actions"
             git add cf_fast_top50.txt cf_fast_top50.csv cf_fast_top50.json
-            git commit -m "Update Region Scan"
+            git commit -m "Update Random Region Scan"
             git push
           else
             echo "没有变化，无需提交。"
