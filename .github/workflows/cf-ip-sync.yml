@@ -19,79 +19,32 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y prips wireguard-tools jq bc iputils-ping unzip
+          sudo apt-get install -y prips jq bc iputils-ping
 
-      - name: Install sing-box (official binary)
+      - name: Install Cloudflare WARP client
         run: |
-          wget https://github.com/SagerNet/sing-box/releases/download/v1.10.0/sing-box-1.10.0-linux-amd64.tar.gz
-          tar -xzf sing-box-1.10.0-linux-amd64.tar.gz
-          sudo mv sing-box-1.10.0-linux-amd64/sing-box /usr/local/bin/
-          chmod +x /usr/local/bin/sing-box
+          curl https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update
+          sudo apt-get install -y cloudflare-warp
 
-      - name: Setup WARP WireGuard + sing-box SOCKS5 (from secret)
-        env:
-          WARP_WG_CONF: ${{ secrets.WARP_WG_CONF }}
+      - name: Start WARP (proxy mode)
         run: |
-          set -e
-
-          if [ -z "$WARP_WG_CONF" ]; then
-            echo "WARP_WG_CONF secret is empty, abort."
-            exit 1
-          fi
-
-          echo "$WARP_WG_CONF" > wgcf.conf
-          sed -i 's/MTU.*/MTU = 1280/' wgcf.conf || true
-
-          sudo wg-quick up ./wgcf.conf
-
-          PRIVATE_KEY=$(grep -m1 "^PrivateKey" wgcf.conf | awk '{print $3}')
-          PUBLIC_KEY=$(grep -m1 "^PublicKey" wgcf.conf | awk '{print $3}')
-          ADDR=$(grep -m1 "^Address" wgcf.conf | awk '{print $3}')
-
-          cat > config.json <<EOF
-          {
-            "log": {
-              "disabled": true
-            },
-            "inbounds": [
-              {
-                "type": "socks",
-                "listen": "127.0.0.1",
-                "listen_port": 40000
-              }
-            ],
-            "outbounds": [
-              {
-                "type": "wireguard",
-                "server": "engage.cloudflareclient.com",
-                "server_port": 2408,
-                "local_address": ["${ADDR}"],
-                "private_key": "${PRIVATE_KEY}",
-                "peer_public_key": "${PUBLIC_KEY}",
-                "mtu": 1280
-              }
-            ]
-          }
-          EOF
-
-          nohup sing-box run -c config.json >/dev/null 2>&1 &
+          sudo warp-cli --accept-tos register
+          sudo warp-cli set-mode proxy
+          sudo warp-cli set-proxy-port 40000
+          sudo warp-cli connect
           sleep 5
 
           export ALL_PROXY="socks5://127.0.0.1:40000"
           if ! curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
-            echo "WARP via sing-box failed"
+            echo "WARP proxy failed"
             exit 1
-          fi
-
-      - name: Load previous valid IPs
-        run: |
-          mkdir -p /dev/shm/cfscan
-          if [ -f valid_ips.txt ]; then
-            cp valid_ips.txt /dev/shm/cfscan/valid_old.txt
           fi
 
       - name: Prepare CIDRs
         run: |
+          mkdir -p /dev/shm/cfscan
           echo "104.16.0.0/13" > /dev/shm/cfscan/cidrs.txt
           echo "104.24.0.0/14" >> /dev/shm/cfscan/cidrs.txt
           echo "172.64.0.0/15" >> /dev/shm/cfscan/cidrs.txt
@@ -104,14 +57,9 @@ jobs:
       - name: Build IP list
         run: |
           > /dev/shm/cfscan/ip_list.txt
-
-          if [ -f /dev/shm/cfscan/valid_old.txt ]; then
-            cut -d '#' -f1 /dev/shm/cfscan/valid_old.txt | shuf -n 4000 >> /dev/shm/cfscan/ip_list.txt
-          else
-            while read cidr; do
-              prips "$cidr" | shuf -n 4096 >> /dev/shm/cfscan/ip_list.txt
-            done < /dev/shm/cfscan/cidrs.txt
-          fi
+          while read cidr; do
+            prips "$cidr" | shuf -n 4096 >> /dev/shm/cfscan/ip_list.txt
+          done < /dev/shm/cfscan/cidrs.txt
 
       - name: Scan IPs
         run: |
@@ -146,7 +94,6 @@ jobs:
       - name: Sort + Top20
         run: |
           if [ ! -s /dev/shm/cfscan/result_raw.txt ]; then
-            echo "No valid IPs found"
             : > valid_ips_full.txt
             : > top20.txt
             : > valid_ips.txt
@@ -155,40 +102,6 @@ jobs:
             head -n 20 valid_ips_full.txt > top20.txt
             awk '{print $1"#"toupper($2)}' valid_ips_full.txt > valid_ips.txt
           fi
-
-      - name: Generate stats
-        run: |
-          if [ ! -s valid_ips_full.txt ]; then
-            echo "日期：$(date -u)" > stats.txt
-            echo "有效 IP：0" >> stats.txt
-            echo "HKG：0" >> stats.txt
-            echo "NRT：0" >> stats.txt
-            echo "ICN：0" >> stats.txt
-          else
-            total=$(wc -l < valid_ips_full.txt)
-            hkg=$(grep -i " hkg " valid_ips_full.txt | wc -l)
-            nrt=$(grep -i " nrt " valid_ips_full.txt | wc -l)
-            icn=$(grep -i " icn " valid_ips_full.txt | wc -l)
-            echo "日期：$(date -u)" > stats.txt
-            echo "有效 IP：$total" >> stats.txt
-            echo "HKG：$hkg" >> stats.txt
-            echo "NRT：$nrt" >> stats.txt
-            echo "ICN：$icn" >> stats.txt
-          fi
-
-      - name: Save history
-        run: |
-          mkdir -p history
-          ts=$(date -u +"%Y-%m-%d")
-          if [ ! -s top20.txt ]; then
-            echo "" > top20.txt
-          fi
-          jq -n \
-            --arg date "$(date -u)" \
-            --arg total "$(wc -l < valid_ips_full.txt 2>/dev/null || echo 0)" \
-            --argjson top20 "$(jq -R -s -c 'split("\n")[:-1]' top20.txt)" \
-            '{date:$date,total:$total,top20:$top20}' \
-            > history/$ts.json
 
       - name: Commit changes
         run: |
