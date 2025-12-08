@@ -16,14 +16,14 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Fetch CloudFlareYes page
+      - name: Fetch CloudFlareYes API
         run: |
           mkdir -p /dev/shm/cfscan
-          curl -s https://stock.hostmonit.com/CloudFlareYes > /dev/shm/cfscan/page.html
+          curl -s https://stock.hostmonit.com/api/CloudFlareYes > /dev/shm/cfscan/api.json
 
       - name: Extract IP list
         run: |
-          grep -oE "([0-9]{1,3}\.){3}[0-9]{1,3}" /dev/shm/cfscan/page.html | sort -u > /dev/shm/cfscan/ip_list.txt
+          jq -r '.data[].ip' /dev/shm/cfscan/api.json | sort -u > /dev/shm/cfscan/ip_list.txt
           echo "提取到 $(wc -l < /dev/shm/cfscan/ip_list.txt) 个 IP"
 
       - name: Scan IPs (800 并发)
