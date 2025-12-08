@@ -32,16 +32,16 @@ jobs:
           while read ip; do
             echo "正在检测 $ip"
 
-            # 获取实际节点（colo）
-            colo=$(curl -s --max-time 2 "https://${ip}/cdn-cgi/trace" | grep '^colo=' | cut -d= -f2)
+            # 获取实际节点（colo） - 使用 HTTP 避免 SSL 错误
+            colo=$(curl -s --max-time 2 "http://${ip}/cdn-cgi/trace" | grep '^colo=' | cut -d= -f2)
             [ -z "$colo" ] && colo="UN"
 
             # 获取延迟
             latency=$(ping -c 1 -W 1 $ip | grep 'time=' | sed 's/.*time=\(.*\) ms/\1/')
             [ -z "$latency" ] && latency="0"
 
-            # 获取下载速度（MB/s）
-            speed_bytes=$(curl -o /dev/null -s --max-time 3 -w "%{speed_download}" "https://${ip}/cdn-cgi/trace")
+            # 获取下载速度（MB/s） - 使用 HTTP 避免 SSL 错误
+            speed_bytes=$(curl -o /dev/null -s --max-time 3 -w "%{speed_download}" "http://${ip}/cdn-cgi/trace")
             speed_mb=$(echo "scale=2; $speed_bytes/1024/1024" | bc 2>/dev/null)
             [ -z "$speed_mb" ] && speed_mb="0"
 
