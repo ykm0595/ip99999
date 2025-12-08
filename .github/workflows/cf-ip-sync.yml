@@ -55,9 +55,9 @@ jobs:
 
           if [ -f /dev/shm/cfscan/valid_old.txt ]; then
             echo "从历史有效 IP 中抽样 2000 个"
-            shuf -n 2000 /dev/shm/cfscan/valid_old.txt >> /dev/shm/cfscan/ip_list.txt
+            cut -d '#' -f1 /dev/shm/cfscan/valid_old.txt | shuf -n 2000 >> /dev/shm/cfscan/ip_list.txt
           else
-            echo "开始从 CIDR 随机抽样"
+            echo "开始从 CIDR 随机抽样（每段 2048 个）"
             while read cidr; do
               [[ "$cidr" =~ ^# ]] && continue
               [[ -z "$cidr" ]] && continue
@@ -72,6 +72,8 @@ jobs:
         run: |
           result="/dev/shm/cfscan/result_raw.txt"
           echo "" > $result
+
+          echo "开始测速..."
 
           cat /dev/shm/cfscan/ip_list.txt | xargs -n 1 -P 800 -I {} sh -c '
             ip="{}"
@@ -102,10 +104,17 @@ jobs:
             printf "%s %s %s %s %s\n" "$ip" "$colo" "$latency_ms" "$speed_mb" "$loss" >> '"$result"'
           '
 
-      - name: Save valid IPs for next run
+      - name: Save valid IPs for next run (IP#Region)
         run: |
-          echo "保存有效 IP（下次扫描优先使用）"
-          awk '{print $1}' /dev/shm/cfscan/result_raw.txt > valid_ips.txt
+          echo "保存有效 IP（带归属地）"
+
+          awk '{
+            ip=$1
+            colo=$2
+            gsub("\r","",colo)
+            upper=toupper(colo)
+            print ip "#" upper
+          }' /dev/shm/cfscan/result_raw.txt > valid_ips.txt
 
           echo "有效 IP 数量：$(wc -l < valid_ips.txt)"
           head -n 20 valid_ips.txt
