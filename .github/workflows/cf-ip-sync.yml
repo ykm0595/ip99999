@@ -1,4 +1,4 @@
-name: Cloudflare-Enhanced-IP-Scan
+name: Cloudflare-Ultimate-IP-Scanner
 
 permissions:
   contents: write
@@ -30,20 +30,23 @@ jobs:
           echo "" > cf_all.txt
 
           while read ip; do
+            echo "正在检测 $ip"
+
             # 获取实际节点（colo）
             colo=$(curl -s --max-time 2 "https://${ip}/cdn-cgi/trace" | grep '^colo=' | cut -d= -f2)
+            [ -z "$colo" ] && colo="UN"
 
             # 获取延迟
             latency=$(ping -c 1 -W 1 $ip | grep 'time=' | sed 's/.*time=\(.*\) ms/\1/')
-
-            # 如果延迟为空，标记为 0
             [ -z "$latency" ] && latency="0"
 
-            # 如果 colo 为空，标记为 UN
-            [ -z "$colo" ] && colo="UN"
+            # 获取下载速度（MB/s）
+            speed_bytes=$(curl -o /dev/null -s --max-time 3 -w "%{speed_download}" "https://${ip}/cdn-cgi/trace")
+            speed_mb=$(echo "scale=2; $speed_bytes/1024/1024" | bc 2>/dev/null)
+            [ -z "$speed_mb" ] && speed_mb="0"
 
-            # 整合格式：IP#节点#延迟ms
-            echo "${ip}#${colo}#${latency}ms" >> cf_all.txt
+            # 输出格式：IP#节点#延迟#速度
+            echo "${ip}#${colo}#${latency}ms#${speed_mb}MB/s" >> cf_all.txt
 
           done < raw_ips.txt
 
