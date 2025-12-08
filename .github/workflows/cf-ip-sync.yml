@@ -29,12 +29,14 @@ jobs:
           chmod +x wgcf
           sudo mv wgcf /usr/local/bin/
 
-      - name: Install wireproxy (auto latest)
+      - name: Install wireproxy (whyvl/wireproxy)
         run: |
-          WIREPROXY_URL=$(curl -s https://api.github.com/repos/octeep/wireproxy/releases/latest \
-            | jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url')
-          wget -O wireproxy.deb "$WIREPROXY_URL"
-          sudo dpkg -i wireproxy.deb || sudo apt-get -f install -y
+          WIREPROXY_URL=$(curl -s https://api.github.com/repos/whyvl/wireproxy/releases/latest \
+            | jq -r '.assets[] | select(.name | contains("linux_amd64")) | .browser_download_url')
+          wget -O wireproxy.tar.gz "$WIREPROXY_URL"
+          tar -xzf wireproxy.tar.gz
+          sudo mv wireproxy /usr/local/bin/
+          chmod +x /usr/local/bin/wireproxy
 
       - name: Setup WARP SOCKS5
         run: |
