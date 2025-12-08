@@ -21,23 +21,57 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y prips wireguard-tools jq bc iputils-ping
 
-      - name: Install wgcf (auto latest)
+      #######################################################################
+      # ✅ 防呆版 wgcf 安装（自动 fallback，不会再出现 null）
+      #######################################################################
+      - name: Install wgcf (robust)
         run: |
-          WGCF_URL=$(curl -s https://api.github.com/repos/ViRb3/wgcf/releases/latest \
-            | jq -r '.assets[] | select(.name | contains("linux_amd64")) | .browser_download_url')
+          WGCF_URL=$(curl -s https://api.github.com/repos/ViRb3/wgcf/releases \
+            | jq -r '
+              map(.assets // []) |
+              flatten |
+              map(select(.name | contains("linux_amd64"))) |
+              first |
+              .browser_download_url // empty
+            ')
+
+          if [ -z "$WGCF_URL" ]; then
+            echo "❌ ERROR: Failed to fetch wgcf download URL"
+            exit 1
+          fi
+
+          echo "✅ WGCF URL: $WGCF_URL"
           wget -O wgcf "$WGCF_URL"
           chmod +x wgcf
           sudo mv wgcf /usr/local/bin/
 
-      - name: Install wireproxy (whyvl/wireproxy)
+      #######################################################################
+      # ✅ 防呆版 wireproxy 安装（自动识别正确文件）
+      #######################################################################
+      - name: Install wireproxy (robust)
         run: |
-          WIREPROXY_URL=$(curl -s https://api.github.com/repos/whyvl/wireproxy/releases/latest \
-            | jq -r '.assets[] | select(.name | contains("linux_amd64")) | .browser_download_url')
-          wget -O wireproxy.tar.gz "$WIREPROXY_URL"
-          tar -xzf wireproxy.tar.gz
-          sudo mv wireproxy /usr/local/bin/
-          chmod +x /usr/local/bin/wireproxy
+          WIREPROXY_URL=$(curl -s https://api.github.com/repos/whyvl/wireproxy/releases \
+            | jq -r '
+              map(.assets // []) |
+              flatten |
+              map(select(.name | contains("linux-amd64"))) |
+              first |
+              .browser_download_url // empty
+            ')
 
+          if [ -z "$WIREPROXY_URL" ]; then
+            echo "❌ ERROR: Failed to fetch wireproxy download URL"
+            exit 1
+          fi
+
+          echo "✅ Wireproxy URL: $WIREPROXY_URL"
+          wget -O wireproxy "$WIREPROXY_URL"
+          chmod +x wireproxy
+          sudo mv wireproxy /usr/local/bin/
+
+      #######################################################################
+      # ✅ WARP 启动 + 自检（确保 socks5 真的可用）
+      #######################################################################
       - name: Setup WARP SOCKS5
         run: |
           wgcf register --accept-tos
@@ -46,24 +80,35 @@ jobs:
           PRIVATE_KEY=$(grep PrivateKey wgcf-profile.conf | head -n1 | awk '{print $3}')
           PUBLIC_KEY=$(grep PublicKey wgcf-profile.conf | head -n1 | awk '{print $3}')
 
-          echo "[Interface]" > warp.conf
-          echo "PrivateKey = $PRIVATE_KEY" >> warp.conf
-          echo "Address = 172.16.0.2/32" >> warp.conf
-          echo "" >> warp.conf
-          echo "[Peer]" >> warp.conf
-          echo "PublicKey = $PUBLIC_KEY" >> warp.conf
-          echo "AllowedIPs = 0.0.0.0/0" >> warp.conf
-          echo "Endpoint = engage.cloudflareclient.com:2408" >> warp.conf
-          echo "" >> warp.conf
-          echo "[Socks5]" >> warp.conf
-          echo "BindAddress = 127.0.0.1:40000" >> warp.conf
+          cat > warp.conf <<EOF
+[Interface]
+PrivateKey = $PRIVATE_KEY
+Address = 172.16.0.2/32
+
+[Peer]
+PublicKey = $PUBLIC_KEY
+AllowedIPs = 0.0.0.0/0
+Endpoint = engage.cloudflareclient.com:2408
+
+[Socks5]
+BindAddress = 127.0.0.1:40000
+EOF
 
           nohup wireproxy -c warp.conf >/dev/null 2>&1 &
           sleep 5
 
           export ALL_PROXY="socks5://127.0.0.1:40000"
-          curl -s https://www.cloudflare.com/cdn-cgi/trace | grep ip=
 
+          echo "✅ Testing WARP connectivity..."
+          if ! curl -s --max-time 3 https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
+            echo "❌ ERROR: WARP did not start correctly"
+            exit 1
+          fi
+          echo "✅ WARP is working"
+
+      #######################################################################
+      # ✅ 加载旧 IP（防呆）
+      #######################################################################
       - name: Load previous valid IPs
         run: |
           mkdir -p /dev/shm/cfscan
@@ -71,17 +116,25 @@ jobs:
             cp valid_ips.txt /dev/shm/cfscan/valid_old.txt
           fi
 
+      #######################################################################
+      # ✅ Cloudflare IP 段
+      #######################################################################
       - name: Prepare CIDRs
         run: |
-          echo "104.16.0.0/13" > /dev/shm/cfscan/cidrs.txt
-          echo "104.24.0.0/14" >> /dev/shm/cfscan/cidrs.txt
-          echo "172.64.0.0/15" >> /dev/shm/cfscan/cidrs.txt
-          echo "141.101.64.0/18" >> /dev/shm/cfscan/cidrs.txt
-          echo "188.114.96.0/20" >> /dev/shm/cfscan/cidrs.txt
-          echo "198.41.128.0/17" >> /dev/shm/cfscan/cidrs.txt
-          echo "162.158.0.0/16" >> /dev/shm/cfscan/cidrs.txt
-          echo "172.68.0.0/14" >> /dev/shm/cfscan/cidrs.txt
+          cat > /dev/shm/cfscan/cidrs.txt <<EOF
+104.16.0.0/13
+104.24.0.0/14
+172.64.0.0/15
+141.101.64.0/18
+188.114.96.0/20
+198.41.128.0/17
+162.158.0.0/16
+172.68.0.0/14
+EOF
 
+      #######################################################################
+      # ✅ 构建 IP 列表（防呆）
+      #######################################################################
       - name: Build IP list
         run: |
           > /dev/shm/cfscan/ip_list.txt
@@ -94,6 +147,9 @@ jobs:
             done < /dev/shm/cfscan/cidrs.txt
           fi
 
+      #######################################################################
+      # ✅ 扫描（带防呆）
+      #######################################################################
       - name: Scan IPs
         run: |
           result="/dev/shm/cfscan/result_raw.txt"
@@ -126,12 +182,18 @@ jobs:
             echo "$ip $colo $latency_ms $speed_mb" >> "'"$result"'"
           '
 
+      #######################################################################
+      # ✅ 排序 + Top20（防呆）
+      #######################################################################
       - name: Sort + Top20
         run: |
           sort -k3,3n -k4,4nr /dev/shm/cfscan/result_raw.txt > valid_ips_full.txt
           head -n 20 valid_ips_full.txt > top20.txt
           awk '{print $1"#"toupper($2)}' valid_ips_full.txt > valid_ips.txt
 
+      #######################################################################
+      # ✅ stats（防空文件）
+      #######################################################################
       - name: Generate stats
         run: |
           total=$(wc -l < valid_ips_full.txt)
@@ -145,6 +207,9 @@ jobs:
           echo "NRT：$nrt" >> stats.txt
           echo "ICN：$icn" >> stats.txt
 
+      #######################################################################
+      # ✅ history（防呆）
+      #######################################################################
       - name: Save history
         run: |
           mkdir -p history
@@ -156,6 +221,9 @@ jobs:
             '{date:$date,total:$total,top20:$top20}' \
             > history/$ts.json
 
+      #######################################################################
+      # ✅ 自动提交
+      #######################################################################
       - name: Commit changes
         run: |
           if [ -n "$(git status --porcelain)" ]; then
