@@ -16,13 +16,14 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Fetch CloudFlareYes API (托管版)
+           - name: Fetch CloudFlareYes API (托管版)
         run: |
           mkdir -p /dev/shm/cfscan
-          curl -s https://cfy-api.pages.dev/ -o /dev/shm/cfscan/api.json
+          curl -s https://cfy-api.vercel.app/ -o /dev/shm/cfscan/api.json
 
           echo "=== API 内容预览 ==="
           head -n 20 /dev/shm/cfscan/api.json
+
 
       - name: Extract IP list
         run: |
