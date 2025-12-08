@@ -38,26 +38,31 @@ jobs:
         run: |
           set -e
 
-          rm -f wgcf-account.toml wgcf-profile.conf wgcf.conf config.json
+          rm -f wgcf-profile.conf wgcf.conf config.json
 
-          # wgcf register 加重试，避免一次 500 直接挂掉
-          try=0
-          max_try=5
-          until [ $try -ge $max_try ]
-          do
-            if wgcf register --accept-tos; then
-              echo "wgcf register success"
-              break
-            else
-              try=$((try+1))
-              echo "wgcf register failed (maybe 500), retry $try/$max_try..."
-              sleep 5
+          # 若已存在账号文件，则复用；若不存在才注册
+          if [ ! -f wgcf-account.toml ]; then
+            echo "No existing wgcf account, start register..."
+            try=0
+            max_try=5
+            until [ $try -ge $max_try ]
+            do
+              if wgcf register --accept-tos; then
+                echo "wgcf register success"
+                break
+              else
+                try=$((try+1))
+                echo "wgcf register failed, retry $try/$max_try..."
+                sleep 5
+              fi
+            done
+
+            if [ $try -ge $max_try ]; then
+              echo "wgcf register failed after $max_try retries, abort."
+              exit 1
             fi
-          done
-
-          if [ $try -ge $max_try ]; then
-            echo "wgcf register failed after $max_try retries, abort."
-            exit 1
+          else
+            echo "wgcf-account.toml exists, skip register."
           fi
 
           wgcf generate
@@ -215,9 +220,9 @@ jobs:
       - name: Commit changes
         run: |
           if [ -n "$(git status --porcelain)" ]; then
-            git config --local user.email "actions@github.com"
-            git config --local user.name "GitHub Actions"
-            git add .
-            git commit -m "Update CF IP scan results"
-            git push
+            git.config --local user.email "actions@github.com"
+            git.config --local user.name "GitHub Actions"
+            git.add .
+            git.commit -m "Update CF IP scan results"
+            git.push
           fi
