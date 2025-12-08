@@ -1,4 +1,4 @@
-name: CF-IP-Scanner-MultiWARP
+name: CF-IP-Scanner
 
 permissions:
   contents: write
@@ -16,7 +16,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install base dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y prips wireguard-tools jq bc iputils-ping unzip golang
@@ -30,7 +30,6 @@ jobs:
       - name: Install wireproxy (build from Cloudflare Go mirror)
         run: |
           set -e
-          # 使用 Go 模块镜像下载源码（proxy.golang.org 是 Cloudflare 托管）
           mkdir -p ~/go-wp
           cd ~/go-wp
           wget https://proxy.golang.org/github.com/octeep/wireproxy/@v/v1.0.6.zip -O wireproxy_v1.0.6.zip
@@ -39,9 +38,8 @@ jobs:
           go build -o wireproxy ./cmd/wireproxy
           sudo mv wireproxy /usr/local/bin/
           chmod +x /usr/local/bin/wireproxy
-          wireproxy -v || true
 
-      - name: Setup 8 WARP SOCKS5 proxies
+      - name: Setup WARP SOCKS5
         run: |
           set -e
 
@@ -53,48 +51,27 @@ jobs:
           PRIVATE_KEY=$(grep PrivateKey wgcf-profile.conf | head -n1 | awk '{print $3}')
           PUBLIC_KEY=$(grep PublicKey wgcf-profile.conf | head -n1 | awk '{print $3}')
 
-          for i in $(seq 0 7); do
-            port=$((40000 + i))
-            addr=$((2 + i))
-            conf="warp_${i}.conf"
+          echo "[Interface]" > warp.conf
+          echo "PrivateKey = $PRIVATE_KEY" >> warp.conf
+          echo "Address = 172.16.0.2/32" >> warp.conf
+          echo "DNS = 1.1.1.1" >> warp.conf
+          echo "MTU = 1280" >> warp.conf
+          echo "[Peer]" >> warp.conf
+          echo "PublicKey = $PUBLIC_KEY" >> warp.conf
+          echo "AllowedIPs = 0.0.0.0/0" >> warp.conf
+          echo "Endpoint = engage.cloudflareclient.com:2408" >> warp.conf
+          echo "PersistentKeepalive = 25" >> warp.conf
+          echo "[Socks5]" >> warp.conf
+          echo "BindAddress = 127.0.0.1:40000" >> warp.conf
 
-            echo "[Interface]" > "$conf"
-            echo "PrivateKey = $PRIVATE_KEY" >> "$conf"
-            echo "Address = 172.16.0.${addr}/32" >> "$conf"
-            echo "DNS = 1.1.1.1" >> "$conf"
-            echo "MTU = 1280" >> "$conf"
-            echo "[Peer]" >> "$conf"
-            echo "PublicKey = $PUBLIC_KEY" >> "$conf"
-            echo "AllowedIPs = 0.0.0.0/0" >> "$conf"
-            echo "Endpoint = engage.cloudflareclient.com:2408" >> "$conf"
-            echo "PersistentKeepalive = 25" >> "$conf"
-            echo "[Socks5]" >> "$conf"
-            echo "BindAddress = 127.0.0.1:${port}" >> "$conf"
+          nohup wireproxy -c warp.conf >/dev/null 2>&1 &
+          sleep 6
 
-            nohup wireproxy -c "$conf" >/dev/null 2>&1 &
-          done
-
-          sleep 8
-
-          ok_count=0
-          for i in $(seq 0 7); do
-            port=$((40000 + i))
-            echo "Testing WARP on port ${port}..."
-            export ALL_PROXY="socks5://127.0.0.1:${port}"
-            if curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
-              echo "WARP instance ${i} OK"
-              ok_count=$((ok_count + 1))
-            else
-              echo "WARP instance ${i} FAILED"
-            fi
-          done
-
-          if [ "$ok_count" -lt 1 ]; then
-            echo "All 8 WARP instances failed"
+          export ALL_PROXY="socks5://127.0.0.1:40000"
+          if ! curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
+            echo "WARP failed"
             exit 1
           fi
-
-          echo "Total working WARP instances: $ok_count"
 
       - name: Load previous valid IPs
         run: |
@@ -114,62 +91,47 @@ jobs:
           echo "162.158.0.0/16" >> /dev/shm/cfscan/cidrs.txt
           echo "172.68.0.0/14" >> /dev/shm/cfscan/cidrs.txt
 
-      - name: Build IP list and split to 8 shards
+      - name: Build IP list
         run: |
           > /dev/shm/cfscan/ip_list.txt
 
           if [ -f /dev/shm/cfscan/valid_old.txt ]; then
-            cut -d '#' -f1 /dev/shm/cfscan/valid_old.txt | shuf -n 8000 >> /dev/shm/cfscan/ip_list.txt
+            cut -d '#' -f1 /dev/shm/cfscan/valid_old.txt | shuf -n 4000 >> /dev/shm/cfscan/ip_list.txt
           else
             while read cidr; do
-              prips "$cidr" | shuf -n 8192 >> /dev/shm/cfscan/ip_list.txt
+              prips "$cidr" | shuf -n 4096 >> /dev/shm/cfscan/ip_list.txt
             done < /dev/shm/cfscan/cidrs.txt
           fi
 
-          split -n l/8 /dev/shm/cfscan/ip_list.txt /dev/shm/cfscan/ip_shard_
-
-      - name: Scan IPs with 8 WARP instances
+      - name: Scan IPs
         run: |
-          mkdir -p /dev/shm/cfscan/results
-          for i in $(seq 0 7); do
-            {
-              shard="/dev/shm/cfscan/ip_shard_0${i}"
-              [ -f "$shard" ] || exit 0
-              result="/dev/shm/cfscan/results/result_${i}.txt"
-              : > "$result"
+          result="/dev/shm/cfscan/result_raw.txt"
+          : > "$result"
+          export ALL_PROXY="socks5://127.0.0.1:40000"
 
-              port=$((40000 + i))
-              export ALL_PROXY="socks5://127.0.0.1:${port}"
+          cat /dev/shm/cfscan/ip_list.txt | xargs -n 1 -P 200 -I {} bash -c '
+            ip="{}"
+            trace=$(curl -s --max-time 1 --resolve speed.cloudflare.com:80:$ip http://speed.cloudflare.com/cdn-cgi/trace)
+            colo=$(echo "$trace" | grep "^colo=" | cut -d= -f2)
+            [ -z "$colo" ] && exit 0
 
-              cat "$shard" | xargs -n 1 -P 100 -I {} bash -c '
-                ip="{}"
-                trace=$(curl -s --max-time 1 --resolve speed.cloudflare.com:80:$ip http://speed.cloudflare.com/cdn-cgi/trace)
-                colo=$(echo "$trace" | grep "^colo=" | cut -d= -f2)
-                [ -z "$colo" ] && exit 0
+            latency=$(curl -o /dev/null -s --max-time 1 \
+              --resolve speed.cloudflare.com:80:$ip \
+              -w "%{time_connect}" http://speed.cloudflare.com/cdn-cgi/trace)
+            latency_ms=$(echo "$latency*1000" | bc)
+            [ -z "$latency_ms" ] && latency_ms=9999
 
-                latency=$(curl -o /dev/null -s --max-time 1 \
-                  --resolve speed.cloudflare.com:80:$ip \
-                  -w "%{time_connect}" http://speed.cloudflare.com/cdn-cgi/trace)
-                latency_ms=$(echo "$latency*1000" | bc)
-                [ -z "$latency_ms" ] && latency_ms=9999
+            if (( $(echo "$latency_ms >= 200" | bc -l) )); then exit 0; fi
 
-                if (( $(echo "$latency_ms >= 200" | bc -l) )); then exit 0; fi
+            speed_bytes=$(curl -o /dev/null -s --max-time 1 \
+              --resolve speed.cloudflare.com:80:$ip \
+              -w "%{speed_download}" \
+              "http://speed.cloudflare.com/__down?bytes=524288")
+            speed_mb=$(echo "$speed_bytes/1024/1024" | bc)
+            [ -z "$speed_mb" ] && speed_mb=0
 
-                speed_bytes=$(curl -o /dev/null -s --max-time 1 \
-                  --resolve speed.cloudflare.com:80:$ip \
-                  -w "%{speed_download}" \
-                  "http://speed.cloudflare.com/__down?bytes=524288")
-                speed_mb=$(echo "$speed_bytes/1024/1024" | bc)
-                [ -z "$speed_mb" ] && speed_mb=0
-
-                echo "$ip $colo $latency_ms $speed_mb" >> "'"$result"'"
-              '
-            } &
-          done
-
-          wait
-
-          cat /dev/shm/cfscan/results/result_*.txt > /dev/shm/cfscan/result_raw.txt || true
+            echo "$ip $colo $latency_ms $speed_mb" >> "'"$result"'"
+          '
 
       - name: Sort + Top20
         run: |
@@ -224,6 +186,6 @@ jobs:
             git config --local user.email "actions@github.com"
             git config --local user.name "GitHub Actions"
             git add .
-            git commit -m "Update CF IP scan results (Multi-WARP)"
+            git commit -m "Update CF IP scan results"
             git push
           fi
