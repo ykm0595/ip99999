@@ -38,23 +38,43 @@ jobs:
         run: |
           set -e
 
-          rm -f wgcf-account.toml wgcf-profile.conf
+          rm -f wgcf-account.toml wgcf-profile.conf wgcf.conf config.json
 
-          wgcf register --accept-tos
+          # wgcf register 加重试，避免一次 500 直接挂掉
+          try=0
+          max_try=5
+          until [ $try -ge $max_try ]
+          do
+            if wgcf register --accept-tos; then
+              echo "wgcf register success"
+              break
+            else
+              try=$((try+1))
+              echo "wgcf register failed (maybe 500), retry $try/$max_try..."
+              sleep 5
+            fi
+          done
+
+          if [ $try -ge $max_try ]; then
+            echo "wgcf register failed after $max_try retries, abort."
+            exit 1
+          fi
+
           wgcf generate
 
-          # 生成 WireGuard 配置
           mv wgcf-profile.conf wgcf.conf
-
-          # 修改 wgcf.conf 以适配 GitHub Actions
           sed -i 's/MTU.*/MTU = 1280/' wgcf.conf
 
-          # 启动 WireGuard
           sudo wg-quick up ./wgcf.conf
 
-          # 生成 sing-box 配置
+          PRIVATE_KEY=$(grep PrivateKey wgcf.conf | head -n1 | awk '{print $3}')
+          PUBLIC_KEY=$(grep PublicKey wgcf.conf | head -n1 | awk '{print $3}')
+
           cat > config.json <<EOF
           {
+            "log": {
+              "disabled": true
+            },
             "inbounds": [
               {
                 "type": "socks",
@@ -68,15 +88,14 @@ jobs:
                 "server": "engage.cloudflareclient.com",
                 "server_port": 2408,
                 "local_address": ["172.16.0.2/32"],
-                "private_key": "$(grep PrivateKey wgcf.conf | head -n1 | awk '{print $3}')",
-                "peer_public_key": "$(grep PublicKey wgcf.conf | head -n1 | awk '{print $3}')",
+                "private_key": "${PRIVATE_KEY}",
+                "peer_public_key": "${PUBLIC_KEY}",
                 "mtu": 1280
               }
             ]
           }
           EOF
 
-          # 启动 sing-box
           nohup sing-box run -c config.json >/dev/null 2>&1 &
           sleep 5
 
@@ -195,7 +214,7 @@ jobs:
 
       - name: Commit changes
         run: |
-          if [ -n "$(git.status --porcelain)" ]; then
+          if [ -n "$(git status --porcelain)" ]; then
             git config --local user.email "actions@github.com"
             git config --local user.name "GitHub Actions"
             git add .
