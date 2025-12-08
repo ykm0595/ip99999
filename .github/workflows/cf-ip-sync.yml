@@ -21,27 +21,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y prips jq bc iputils-ping
 
-      - name: Install Cloudflare WARP client
-        run: |
-          curl https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update
-          sudo apt-get install -y cloudflare-warp
-
-      - name: Start WARP (proxy mode)
-        run: |
-          sudo warp-cli --accept-tos registration new
-          sudo warp-cli set-mode proxy
-          sudo warp-cli set-proxy-port 40000
-          sudo warp-cli connect
-          sleep 5
-
-          export ALL_PROXY="socks5://127.0.0.1:40000"
-          if ! curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
-            echo "WARP proxy failed"
-            exit 1
-          fi
-
       - name: Prepare CIDRs
         run: |
           mkdir -p /dev/shm/cfscan
@@ -65,22 +44,26 @@ jobs:
         run: |
           result="/dev/shm/cfscan/result_raw.txt"
           : > "$result"
-          export ALL_PROXY="socks5://127.0.0.1:40000"
 
           cat /dev/shm/cfscan/ip_list.txt | xargs -n 1 -P 200 -I {} bash -c '
             ip="{}"
+
+            # 1. 获取 colo
             trace=$(curl -s --max-time 1 --resolve speed.cloudflare.com:80:$ip http://speed.cloudflare.com/cdn-cgi/trace)
             colo=$(echo "$trace" | grep "^colo=" | cut -d= -f2)
             [ -z "$colo" ] && exit 0
 
+            # 2. 获取延迟
             latency=$(curl -o /dev/null -s --max-time 1 \
               --resolve speed.cloudflare.com:80:$ip \
               -w "%{time_connect}" http://speed.cloudflare.com/cdn-cgi/trace)
             latency_ms=$(echo "$latency*1000" | bc)
             [ -z "$latency_ms" ] && latency_ms=9999
 
+            # 过滤延迟过高
             if (( $(echo "$latency_ms >= 200" | bc -l) )); then exit 0; fi
 
+            # 3. 获取下载速度
             speed_bytes=$(curl -o /dev/null -s --max-time 1 \
               --resolve speed.cloudflare.com:80:$ip \
               -w "%{speed_download}" \
