@@ -1,4 +1,4 @@
-name: Cloudflare-Region-Random-Scanner
+name: Cloudflare-Region-Random-Scanner-WARP
 
 permissions:
   contents: write
@@ -16,10 +16,20 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install prips
+      - name: Install dependencies (prips + warp-cli)
         run: |
           sudo apt-get update
           sudo apt-get install -y prips
+          sudo apt-get install -y cloudflare-warp
+
+      - name: Register and enable WARP
+        run: |
+          sudo warp-cli register
+          sudo warp-cli set-mode proxy
+          sudo warp-cli set-proxy-port 40000
+          sudo warp-cli connect
+          sleep 3
+          echo "WARP 已启用"
 
       - name: Load previous valid IPs (if exist)
         run: |
@@ -68,21 +78,23 @@ jobs:
           echo "最终扫描 IP 数量：$(wc -l < /dev/shm/cfscan/ip_list.txt)"
           head -n 20 /dev/shm/cfscan/ip_list.txt
 
-      - name: Scan IPs (800 并发)
+      - name: Scan IPs (800 并发 via WARP proxy)
         run: |
           result="/dev/shm/cfscan/result_raw.txt"
           echo "" > $result
 
-          echo "开始测速..."
+          export ALL_PROXY="http://127.0.0.1:40000"
+
+          echo "开始测速（通过 WARP）..."
 
           cat /dev/shm/cfscan/ip_list.txt | xargs -n 1 -P 800 -I {} sh -c '
             ip="{}"
 
-            colo=$(curl -s --max-time 0.2 --resolve speed.cloudflare.com:80:$ip \
+            colo=$(curl -s --max-time 0.5 --resolve speed.cloudflare.com:80:$ip \
               http://speed.cloudflare.com/cdn-cgi/trace | grep "^colo=" | cut -d= -f2)
             [ -z "$colo" ] && exit 0
 
-            latency=$(curl -o /dev/null -s --max-time 0.2 \
+            latency=$(curl -o /dev/null -s --max-time 0.5 \
               --resolve speed.cloudflare.com:80:$ip \
               -w "%{time_connect}" http://speed.cloudflare.com/cdn-cgi/trace)
             latency_ms=$(echo "$latency*1000" | bc 2>/dev/null)
@@ -94,7 +106,7 @@ jobs:
             [ -z "$loss" ] && loss=100
             if (( $(echo "$loss > 50" | bc -l) )); then exit 0; fi
 
-            speed_bytes=$(curl -o /dev/null -s --max-time 0.5 \
+            speed_bytes=$(curl -o /dev/null -s --max-time 0.8 \
               --resolve speed.cloudflare.com:80:$ip \
               -w "%{speed_download}" \
               "http://speed.cloudflare.com/__down?bytes=524288")
@@ -125,7 +137,7 @@ jobs:
             git config --local user.email "actions@github.com"
             git config --local user.name "GitHub Actions"
             git add valid_ips.txt
-            git commit -m "Update valid IPs"
+            git.commit -m "Update valid IPs (WARP)"
             git push
           else
             echo "没有变化，无需提交"
