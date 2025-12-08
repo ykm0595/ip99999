@@ -21,9 +21,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y prips
 
-      - name: Prepare region CIDRs (HKG / ICN / NRT)
+      - name: Load previous valid IPs (if exist)
         run: |
           mkdir -p /dev/shm/cfscan
+          if [ -f valid_ips.txt ]; then
+            echo "检测到历史有效 IP，优先使用"
+            cp valid_ips.txt /dev/shm/cfscan/valid_old.txt
+          else
+            echo "没有历史有效 IP，将进行全量随机抽样"
+          fi
+
+      - name: Prepare region CIDRs
+        run: |
           cat <<EOF > /dev/shm/cfscan/cidrs.txt
           # Hong Kong
           104.16.0.0/13
@@ -40,31 +49,29 @@ jobs:
           172.68.0.0/14
           EOF
 
-          echo "=== 扫描 CIDR 列表 ==="
-          cat /dev/shm/cfscan/cidrs.txt
-
-      - name: Expand & Random Sample IPs
+      - name: Build IP list (random or from valid)
         run: |
-          echo "开始展开并随机抽样 IP..."
           > /dev/shm/cfscan/ip_list.txt
 
-          while read cidr; do
-            [[ "$cidr" =~ ^# ]] && continue
-            [[ -z "$cidr" ]] && continue
+          if [ -f /dev/shm/cfscan/valid_old.txt ]; then
+            echo "从历史有效 IP 中抽样 2000 个"
+            shuf -n 2000 /dev/shm/cfscan/valid_old.txt >> /dev/shm/cfscan/ip_list.txt
+          else
+            echo "开始从 CIDR 随机抽样"
+            while read cidr; do
+              [[ "$cidr" =~ ^# ]] && continue
+              [[ -z "$cidr" ]] && continue
+              prips $cidr | shuf -n 2048 >> /dev/shm/cfscan/ip_list.txt
+            done < /dev/shm/cfscan/cidrs.txt
+          fi
 
-            # 展开 CIDR → 随机抽样 2048 个 IP
-            prips $cidr | shuf -n 2048 >> /dev/shm/cfscan/ip_list.txt
-          done < /dev/shm/cfscan/cidrs.txt
-
-          echo "抽样完成，共 $(wc -l < /dev/shm/cfscan/ip_list.txt) 个 IP"
+          echo "最终扫描 IP 数量：$(wc -l < /dev/shm/cfscan/ip_list.txt)"
           head -n 20 /dev/shm/cfscan/ip_list.txt
 
       - name: Scan IPs (800 并发)
         run: |
           result="/dev/shm/cfscan/result_raw.txt"
           echo "" > $result
-
-          echo "开始测速..."
 
           cat /dev/shm/cfscan/ip_list.txt | xargs -n 1 -P 800 -I {} sh -c '
             ip="{}"
@@ -92,48 +99,25 @@ jobs:
             speed_mb=$(echo "$speed_bytes/1024/1024" | bc 2>/dev/null)
             [ -z "$speed_mb" ] && speed_mb="0"
 
-            isp="cloudflare"
-
-            printf "%s %s %s %s %s %s\n" "$ip" "$colo" "$latency_ms" "$speed_mb" "$loss" "$isp" >> '"$result"'
+            printf "%s %s %s %s %s\n" "$ip" "$colo" "$latency_ms" "$speed_mb" "$loss" >> '"$result"'
           '
 
-          echo "=== 原始测速结果前 20 行 ==="
-          head -n 20 "$result"
-
-      - name: Sort and save results
+      - name: Save valid IPs for next run
         run: |
-          result="/dev/shm/cfscan/result_raw.txt"
+          echo "保存有效 IP（下次扫描优先使用）"
+          awk '{print $1}' /dev/shm/cfscan/result_raw.txt > valid_ips.txt
 
-          if [ ! -s "$result" ]; then
-            echo "没有测速结果，跳过生成文件。"
-            exit 0
-          fi
-
-          sort -k4 -nr $result | head -n 50 | awk \
-            "{print \$1\"#\"\$2\"#\"\$3\"ms#\"\$4\"MB/s#loss=\"\$5\"#\"\$6}" \
-            > cf_fast_top50.txt
-
-          echo "ip,colo,latency_ms,speed_mb,loss,isp" > cf_fast_top50.csv
-          sort -k4 -nr $result | head -n 50 >> cf_fast_top50.csv
-
-          sort -k4 -nr $result | head -n 50 | awk '
-            BEGIN { print "[" }
-            {
-              printf "  {\"ip\":\"%s\",\"colo\":\"%s\",\"latency_ms\":%s,\"speed_mb\":%s,\"loss\":%s,\"isp\":\"%s\"}",
-                $1,$2,$3,$4,$5,$6
-              if (NR < 50) print ","; else print ""
-            }
-            END { print "]" }
-          ' > cf_fast_top50.json
+          echo "有效 IP 数量：$(wc -l < valid_ips.txt)"
+          head -n 20 valid_ips.txt
 
       - name: Commit changes
         run: |
-          if [ -n "$(git.status --porcelain)" ]; then
+          if [ -n "$(git status --porcelain)" ]; then
             git config --local user.email "actions@github.com"
             git config --local user.name "GitHub Actions"
-            git add cf_fast_top50.txt cf_fast_top50.csv cf_fast_top50.json
-            git commit -m "Update Random Region Scan"
+            git add valid_ips.txt
+            git commit -m "Update valid IPs"
             git push
           else
-            echo "没有变化，无需提交。"
+            echo "没有变化，无需提交"
           fi
