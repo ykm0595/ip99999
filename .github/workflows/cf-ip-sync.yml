@@ -1,11 +1,12 @@
-name: Cloudflare-Ultimate-Fast-Scanner
+name: Cloudflare-Smart-Scanner
 
 permissions:
   contents: write
 
 on:
   schedule:
-    - cron: "0 18 * * *"   # 北京时间凌晨2点
+    - cron: "0 18 * * *"        # 每天扫描（只扫描有效 IP）
+    - cron: "0 18 * * 0"        # 每周日全量扫描
   workflow_dispatch:
 
 jobs:
@@ -16,27 +17,35 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Generate IP list (162.159.x.x + 172.64.x.x)
+      - name: Prepare IP list
         run: |
           mkdir -p /dev/shm/cfscan
-          ipfile="/dev/shm/cfscan/ip_list.txt"
-          echo "" > $ipfile
 
-          # 162.159.0.0/16
-          for i in {0..255}; do
-            for j in {0..255}; do
-              echo "162.159.$i.$j" >> $ipfile
+          # 如果存在 cf_valid.txt，则只扫描有效 IP
+          if [ -f cf_valid.txt ]; then
+            echo "使用上次的有效 IP 列表"
+            cp cf_valid.txt /dev/shm/cfscan/ip_list.txt
+          else
+            echo "首次运行：生成全量 IP 列表"
+            ipfile="/dev/shm/cfscan/ip_list.txt"
+            echo "" > $ipfile
+
+            # 162.159.0.0/16
+            for i in {0..255}; do
+              for j in {0..255}; do
+                echo "162.159.$i.$j" >> $ipfile
+              done
             done
-          done
 
-          # 172.64.0.0/16
-          for i in {0..255}; do
-            for j in {0..255}; do
-              echo "172.64.$i.$j" >> $ipfile
+            # 172.64.0.0/16
+            for i in {0..255}; do
+              for j in {0..255}; do
+                echo "172.64.$i.$j" >> $ipfile
+              done
             done
-          done
+          fi
 
-      - name: Scan IPs (2000 并发 · 终极优化)
+      - name: Scan IPs (2000 并发)
         run: |
           result="/dev/shm/cfscan/result_raw.txt"
           echo "" > $result
@@ -44,31 +53,28 @@ jobs:
           scan_ip() {
             ip=$1
 
-            # 超快节点检测（0.2 秒）
+            # 节点检测
             colo=$(curl -s --max-time 0.2 --resolve speed.cloudflare.com:80:$ip \
               http://speed.cloudflare.com/cdn-cgi/trace | grep '^colo=' | cut -d= -f2)
-
             [ -z "$colo" ] && return 0
 
-            # 超快延迟检测（0.2 秒）
+            # 延迟检测
             latency=$(curl -o /dev/null -s --max-time 0.2 \
               --resolve speed.cloudflare.com:80:$ip \
               -w "%{time_connect}" http://speed.cloudflare.com/cdn-cgi/trace)
-
             latency_ms=$(echo "$latency*1000" | bc 2>/dev/null)
             [ -z "$latency_ms" ] && latency_ms="9999"
 
-            # ✅ 延迟过滤：200ms 以上直接丢弃
+            # 延迟过滤
             if (( $(echo "$latency_ms >= 200" | bc -l) )); then
               return 0
             fi
 
-            # 极速测速（512KB 文件 · 0.5 秒）
+            # 速度测试（512KB）
             speed_bytes=$(curl -o /dev/null -s --max-time 0.5 \
               --resolve speed.cloudflare.com:80:$ip \
               -w "%{speed_download}" \
               "http://speed.cloudflare.com/__down?bytes=524288")
-
             speed_mb=$(echo "$speed_bytes/1024/1024" | bc 2>/dev/null)
             [ -z "$speed_mb" ] && speed_mb="0"
 
@@ -77,25 +83,24 @@ jobs:
 
           export -f scan_ip
 
-          # ✅ 2000 并发（极限）
           cat /dev/shm/cfscan/ip_list.txt | xargs -n 1 -P 2000 bash -c 'scan_ip "$@"' _
 
-      - name: Sort and output TOP 50
+      - name: Sort and save results
         run: |
           result="/dev/shm/cfscan/result_raw.txt"
-          outfile="cf_fast_top50.txt"
-          echo "" > $outfile
 
-          sort -k4 -nr $result | head -n 50 | while read ip colo latency speed; do
-            echo "$ip#$colo#${latency}ms#${speed}MB/s" >> $outfile
-          done
+          # 保存 TOP50
+          sort -k4 -nr $result | head -n 50 | awk '{print $1"#"$2"#"$3"ms#"$4"MB/s"}' > cf_fast_top50.txt
+
+          # 保存所有有效 IP（用于下次扫描）
+          awk '{print $1}' $result > cf_valid.txt
 
       - name: Commit changes
         run: |
           if [ -n "$(git status --porcelain)" ]; then
             git config --local user.email "actions@github.com"
             git config --local user.name "GitHub Actions"
-            git add cf_fast_top50.txt
-            git commit -m "Update Cloudflare Ultimate Fast TOP50"
+            git add cf_fast_top50.txt cf_valid.txt
+            git commit -m "Update Cloudflare Smart Scan"
             git push
           fi
