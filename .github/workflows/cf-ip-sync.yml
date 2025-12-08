@@ -1,3 +1,41 @@
+name: Cloudflare-Ultimate-Fast-Scanner
+
+permissions:
+  contents: write
+
+on:
+  schedule:
+    - cron: "0 18 * * *"   # 北京时间凌晨2点
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Generate IP list (162.159.x.x + 172.64.x.x)
+        run: |
+          mkdir -p /dev/shm/cfscan
+          ipfile="/dev/shm/cfscan/ip_list.txt"
+          echo "" > $ipfile
+
+          # 162.159.0.0/16
+          for i in {0..255}; do
+            for j in {0..255}; do
+              echo "162.159.$i.$j" >> $ipfile
+            done
+          done
+
+          # 172.64.0.0/16
+          for i in {0..255}; do
+            for j in {0..255}; do
+              echo "172.64.$i.$j" >> $ipfile
+            done
+          done
+
       - name: Scan IPs (2000 并发 · 终极优化)
         run: |
           result="/dev/shm/cfscan/result_raw.txt"
@@ -39,5 +77,25 @@
 
           export -f scan_ip
 
-          # 2000 并发（极限）
+          # ✅ 2000 并发（极限）
           cat /dev/shm/cfscan/ip_list.txt | xargs -n 1 -P 2000 bash -c 'scan_ip "$@"' _
+
+      - name: Sort and output TOP 50
+        run: |
+          result="/dev/shm/cfscan/result_raw.txt"
+          outfile="cf_fast_top50.txt"
+          echo "" > $outfile
+
+          sort -k4 -nr $result | head -n 50 | while read ip colo latency speed; do
+            echo "$ip#$colo#${latency}ms#${speed}MB/s" >> $outfile
+          done
+
+      - name: Commit changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git config --local user.email "actions@github.com"
+            git config --local user.name "GitHub Actions"
+            git add cf_fast_top50.txt
+            git commit -m "Update Cloudflare Ultimate Fast TOP50"
+            git push
+          fi
