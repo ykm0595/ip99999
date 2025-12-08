@@ -25,37 +25,5 @@ jobs:
         run: |
           grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' page.html | sort -u > raw_ips.txt
 
-      - name: Generate simplified geolocation
+      - name: Detect geolocation and generate output
         run: |
-          echo "" > cf_ips.txt
-
-          while read ip; do
-            # Cloudflare 常见 IP 段归属地简写
-            if [[ "$ip" == 104.* || "$ip" == 172.* || "$ip" == 198.* ]]; then
-              loc="US"
-            elif [[ "$ip" == 103.* ]]; then
-              loc="SG"
-            elif [[ "$ip" == 141.* ]]; then
-              loc="DE"
-            elif [[ "$ip" == 188.* ]]; then
-              loc="NL"
-            elif [[ "$ip" == 146.* ]]; then
-              loc="UK"
-            elif [[ "$ip" == 162.* ]]; then
-              loc="US"
-            else
-              loc="US"
-            fi
-
-            echo "${ip}#${loc}" >> cf_ips.txt
-          done < raw_ips.txt
-
-      - name: Commit changes
-        run: |
-          if [ -n "$(git status --porcelain)" ]; then
-            git config --local user.email "actions@github.com"
-            git config --local user.name "GitHub Actions"
-            git add cf_ips.txt
-            git commit -m "Update Cloudflare IP list (short geolocation)"
-            git push
-          fi
