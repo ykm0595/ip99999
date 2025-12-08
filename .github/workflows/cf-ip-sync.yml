@@ -16,29 +16,53 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install dependencies (prips + warp-cli)
+      - name: Install dependencies (prips + wireproxy + wgcf)
         run: |
           sudo apt-get update
-          sudo apt-get install -y prips
-          sudo apt-get install -y cloudflare-warp
+          sudo apt-get install -y prips wireguard-tools
 
-      - name: Register and enable WARP
+          # 安装 wgcf
+          wget -O wgcf.tar.gz https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_linux_amd64.tar.gz
+          tar -xzf wgcf.tar.gz
+          sudo mv wgcf /usr/local/bin/
+
+          # 安装 wireproxy
+          wget -O wireproxy.deb https://github.com/pufferffish/wireproxy/releases/latest/download/wireproxy_amd64.deb
+          sudo dpkg -i wireproxy.deb
+
+      - name: Generate WARP config
         run: |
-          sudo warp-cli register
-          sudo warp-cli set-mode proxy
-          sudo warp-cli set-proxy-port 40000
-          sudo warp-cli connect
-          sleep 3
-          echo "WARP 已启用"
+          wgcf register --accept-tos
+          wgcf generate
+
+          # 修改 wgcf-profile.conf 以适配 wireproxy
+          sed -i 's/Endpoint =.*/Endpoint = engage.cloudflareclient.com:2408/' wgcf-profile.conf
+
+          # 创建 wireproxy 配置
+          cat <<EOF > warp-socks5.conf
+          [Interface]
+          PrivateKey = $(grep PrivateKey wgcf-profile.conf | awk '{print $3}')
+          Address = 172.16.0.2/32
+
+          [Peer]
+          PublicKey = $(grep PublicKey wgcf-profile.conf | awk '{print $3}')
+          AllowedIPs = 0.0.0.0/0
+          Endpoint = engage.cloudflareclient.com:2408
+
+          [Socks5]
+          BindAddress = 127.0.0.1:40000
+          EOF
+
+          # 启动 wireproxy（WARP SOCKS5）
+          nohup wireproxy -c warp-socks5.conf >/dev/null 2>&1 &
+
+          echo "✅ WARP SOCKS5 已启动"
 
       - name: Load previous valid IPs (if exist)
         run: |
           mkdir -p /dev/shm/cfscan
           if [ -f valid_ips.txt ]; then
-            echo "检测到历史有效 IP，优先使用"
             cp valid_ips.txt /dev/shm/cfscan/valid_old.txt
-          else
-            echo "没有历史有效 IP，将进行全量随机抽样"
           fi
 
       - name: Prepare region CIDRs
@@ -64,10 +88,8 @@ jobs:
           > /dev/shm/cfscan/ip_list.txt
 
           if [ -f /dev/shm/cfscan/valid_old.txt ]; then
-            echo "从历史有效 IP 中抽样 2000 个"
             cut -d '#' -f1 /dev/shm/cfscan/valid_old.txt | shuf -n 2000 >> /dev/shm/cfscan/ip_list.txt
           else
-            echo "开始从 CIDR 随机抽样（每段 2048 个）"
             while read cidr; do
               [[ "$cidr" =~ ^# ]] && continue
               [[ -z "$cidr" ]] && continue
@@ -75,19 +97,14 @@ jobs:
             done < /dev/shm/cfscan/cidrs.txt
           fi
 
-          echo "最终扫描 IP 数量：$(wc -l < /dev/shm/cfscan/ip_list.txt)"
-          head -n 20 /dev/shm/cfscan/ip_list.txt
-
-      - name: Scan IPs (800 并发 via WARP proxy)
+      - name: Scan IPs (via WARP SOCKS5)
         run: |
           result="/dev/shm/cfscan/result_raw.txt"
           echo "" > $result
 
-          export ALL_PROXY="http://127.0.0.1:40000"
+          export ALL_PROXY="socks5://127.0.0.1:40000"
 
-          echo "开始测速（通过 WARP）..."
-
-          cat /dev/shm/cfscan/ip_list.txt | xargs -n 1 -P 800 -I {} sh -c '
+          cat /dev/shm/cfscan/ip_list.txt | xargs -n 1 -P 500 -I {} sh -c '
             ip="{}"
 
             colo=$(curl -s --max-time 0.5 --resolve speed.cloudflare.com:80:$ip \
@@ -102,34 +119,17 @@ jobs:
 
             if (( $(echo "$latency_ms >= 200" | bc -l) )); then exit 0; fi
 
-            loss=$(ping -c 3 -W 1 $ip 2>/dev/null | grep "packet loss" | awk -F% "{print \$1}" | awk "{print \$NF}")
-            [ -z "$loss" ] && loss=100
-            if (( $(echo "$loss > 50" | bc -l) )); then exit 0; fi
-
-            speed_bytes=$(curl -o /dev/null -s --max-time 0.8 \
-              --resolve speed.cloudflare.com:80:$ip \
-              -w "%{speed_download}" \
-              "http://speed.cloudflare.com/__down?bytes=524288")
-            speed_mb=$(echo "$speed_bytes/1024/1024" | bc 2>/dev/null)
-            [ -z "$speed_mb" ] && speed_mb="0"
-
-            printf "%s %s %s %s %s\n" "$ip" "$colo" "$latency_ms" "$speed_mb" "$loss" >> '"$result"'
+            printf "%s %s %s\n" "$ip" "$colo" "$latency_ms" >> '"$result"'
           '
 
-      - name: Save valid IPs for next run (IP#Region)
+      - name: Save valid IPs (IP#Region)
         run: |
-          echo "保存有效 IP（带归属地）"
-
           awk '{
             ip=$1
             colo=$2
-            gsub("\r","",colo)
             upper=toupper(colo)
             print ip "#" upper
           }' /dev/shm/cfscan/result_raw.txt > valid_ips.txt
-
-          echo "有效 IP 数量：$(wc -l < valid_ips.txt)"
-          head -n 20 valid_ips.txt
 
       - name: Commit changes
         run: |
@@ -137,8 +137,6 @@ jobs:
             git config --local user.email "actions@github.com"
             git config --local user.name "GitHub Actions"
             git add valid_ips.txt
-            git.commit -m "Update valid IPs (WARP)"
+            git commit -m "Update valid IPs (WARP SOCKS5)"
             git push
-          else
-            echo "没有变化，无需提交"
           fi
