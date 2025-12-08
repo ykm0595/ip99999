@@ -19,7 +19,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y prips wireguard-tools jq bc iputils-ping unzip golang
+          sudo apt-get install -y prips wireguard-tools jq bc iputils-ping unzip
 
       - name: Install wgcf (fixed version)
         run: |
@@ -27,19 +27,14 @@ jobs:
           chmod +x wgcf
           sudo mv wgcf /usr/local/bin/
 
-      - name: Install wireproxy (build from Cloudflare Go mirror)
+      - name: Install sing-box (official binary)
         run: |
-          set -e
-          mkdir -p ~/go-wp
-          cd ~/go-wp
-          wget https://proxy.golang.org/github.com/octeep/wireproxy/@v/v1.0.6.zip -O wireproxy_v1.0.6.zip
-          unzip wireproxy_v1.0.6.zip
-          cd github.com/octeep/wireproxy@v1.0.6
-          go build -o wireproxy ./cmd/wireproxy
-          sudo mv wireproxy /usr/local/bin/
-          chmod +x /usr/local/bin/wireproxy
+          wget https://github.com/SagerNet/sing-box/releases/download/v1.10.0/sing-box-1.10.0-linux-amd64.tar.gz
+          tar -xzf sing-box-1.10.0-linux-amd64.tar.gz
+          sudo mv sing-box-1.10.0-linux-amd64/sing-box /usr/local/bin/
+          chmod +x /usr/local/bin/sing-box
 
-      - name: Setup WARP SOCKS5
+      - name: Setup WARP WireGuard + sing-box SOCKS5
         run: |
           set -e
 
@@ -48,28 +43,46 @@ jobs:
           wgcf register --accept-tos
           wgcf generate
 
-          PRIVATE_KEY=$(grep PrivateKey wgcf-profile.conf | head -n1 | awk '{print $3}')
-          PUBLIC_KEY=$(grep PublicKey wgcf-profile.conf | head -n1 | awk '{print $3}')
+          # 生成 WireGuard 配置
+          mv wgcf-profile.conf wgcf.conf
 
-          echo "[Interface]" > warp.conf
-          echo "PrivateKey = $PRIVATE_KEY" >> warp.conf
-          echo "Address = 172.16.0.2/32" >> warp.conf
-          echo "DNS = 1.1.1.1" >> warp.conf
-          echo "MTU = 1280" >> warp.conf
-          echo "[Peer]" >> warp.conf
-          echo "PublicKey = $PUBLIC_KEY" >> warp.conf
-          echo "AllowedIPs = 0.0.0.0/0" >> warp.conf
-          echo "Endpoint = engage.cloudflareclient.com:2408" >> warp.conf
-          echo "PersistentKeepalive = 25" >> warp.conf
-          echo "[Socks5]" >> warp.conf
-          echo "BindAddress = 127.0.0.1:40000" >> warp.conf
+          # 修改 wgcf.conf 以适配 GitHub Actions
+          sed -i 's/MTU.*/MTU = 1280/' wgcf.conf
 
-          nohup wireproxy -c warp.conf >/dev/null 2>&1 &
-          sleep 6
+          # 启动 WireGuard
+          sudo wg-quick up ./wgcf.conf
+
+          # 生成 sing-box 配置
+          cat > config.json <<EOF
+          {
+            "inbounds": [
+              {
+                "type": "socks",
+                "listen": "127.0.0.1",
+                "listen_port": 40000
+              }
+            ],
+            "outbounds": [
+              {
+                "type": "wireguard",
+                "server": "engage.cloudflareclient.com",
+                "server_port": 2408,
+                "local_address": ["172.16.0.2/32"],
+                "private_key": "$(grep PrivateKey wgcf.conf | head -n1 | awk '{print $3}')",
+                "peer_public_key": "$(grep PublicKey wgcf.conf | head -n1 | awk '{print $3}')",
+                "mtu": 1280
+              }
+            ]
+          }
+          EOF
+
+          # 启动 sing-box
+          nohup sing-box run -c config.json >/dev/null 2>&1 &
+          sleep 5
 
           export ALL_PROXY="socks5://127.0.0.1:40000"
           if ! curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
-            echo "WARP failed"
+            echo "WARP via sing-box failed"
             exit 1
           fi
 
@@ -182,7 +195,7 @@ jobs:
 
       - name: Commit changes
         run: |
-          if [ -n "$(git status --porcelain)" ]; then
+          if [ -n "$(git.status --porcelain)" ]; then
             git config --local user.email "actions@github.com"
             git config --local user.name "GitHub Actions"
             git add .
