@@ -19,8 +19,18 @@ jobs:
 
       - name: Extract IPs
         run: |
-          # 提取 IPv4 地址
-          grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' page.html | sort -u > cf_ips.txt
+          grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' page.html | sort -u > raw_ips.txt
+
+      - name: Query IP geolocation
+        run: |
+          echo "" > cf_ips.txt
+          while read ip; do
+            # 使用免费API查询归属地
+            loc=$(curl -s "https://ipapi.co/${ip}/country_name/")
+            # 如果API失败则标记未知
+            [ -z "$loc" ] && loc="Unknown"
+            echo "${ip}#${loc}" >> cf_ips.txt
+          done < raw_ips.txt
 
       - name: Commit changes
         run: |
@@ -28,6 +38,6 @@ jobs:
             git config --local user.email "actions@github.com"
             git config --local user.name "GitHub Actions"
             git add cf_ips.txt
-            git commit -m "Update Cloudflare IP list"
+            git commit -m "Update Cloudflare IP list with geolocation"
             git push
           fi
