@@ -1,11 +1,11 @@
-name: Cloudflare-Ultimate-IP-Scanner
+name: Cloudflare-Fast-Scanner
 
 permissions:
   contents: write
 
 on:
   schedule:
-    - cron: "0 18 * * *"
+    - cron: "0 18 * * *"   # 北京时间凌晨2点
   workflow_dispatch:
 
 jobs:
@@ -16,42 +16,74 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Fetch Cloudflare HTML
+      - name: Generate IP list (162.159.x.x + 172.64.x.x)
         run: |
-          curl -s https://api.uouin.com/cloudflare.html -o page.html
+          echo "" > ip_list.txt
 
-      - name: Extract IPs
+          # 162.159.0.0/16
+          for i in {0..255}; do
+            for j in {0..255}; do
+              echo "162.159.$i.$j" >> ip_list.txt
+            done
+          done
+
+          # 172.64.0.0/16
+          for i in {0..255}; do
+            for j in {0..255}; do
+              echo "172.64.$i.$j" >> ip_list.txt
+            done
+          done
+
+      - name: Scan IPs (20 并发) 并生成结果
         run: |
-          grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' page.html | sort -u > raw_ips.txt
+          echo "" > result_raw.txt
 
-      - name: Scan IPs and generate cf_all.txt
+          scan_ip() {
+            ip=$1
+
+            # 获取节点
+            colo=$(curl -s --max-time 2 --resolve speed.cloudflare.com:80:$ip \
+              http://speed.cloudflare.com/cdn-cgi/trace | grep '^colo=' | cut -d= -f2)
+            [ -z "$colo" ] && colo="UN"
+
+            # 延迟
+            latency=$(curl -o /dev/null -s --max-time 3 \
+              --resolve speed.cloudflare.com:80:$ip \
+              -w "%{time_connect}" http://speed.cloudflare.com/cdn-cgi/trace)
+            latency_ms=$(echo "$latency*1000" | bc 2>/dev/null)
+            [ -z "$latency_ms" ] && latency_ms="9999"
+
+            # 下载速度（10MB）
+            speed_bytes=$(curl -o /dev/null -s --max-time 5 \
+              --resolve speed.cloudflare.com:80:$ip \
+              -w "%{speed_download}" \
+              "http://speed.cloudflare.com/__down?bytes=10000000")
+            speed_mb=$(echo "$speed_bytes/1024/1024" | bc 2>/dev/null)
+            [ -z "$speed_mb" ] && speed_mb="0"
+
+            echo "$ip $colo $latency_ms $speed_mb" >> result_raw.txt
+          }
+
+          export -f scan_ip
+
+          # 20 并发扫描
+          cat ip_list.txt | xargs -n 1 -P 20 bash -c 'scan_ip "$@"' _
+
+      - name: Sort and output TOP 50
         run: |
-          echo "" > cf_all.txt
+          echo "" > cf_fast_top50.txt
 
-          while read ip; do
-            echo "检测 $ip"
-
-            colo=$(curl -s --max-time 2 --resolve speed.cloudflare.com:80:$ip http://speed.cloudflare.com/cdn-cgi/trace | grep '^colo=' | cut -d= -f2)
-            if [ -z "$colo" ]; then colo="UN"; fi
-
-            latency=$(curl -o /dev/null -s --max-time 3 --resolve speed.cloudflare.com:80:$ip -w "%{time_connect}" http://speed.cloudflare.com/cdn-cgi/trace)
-            latency_ms=$(echo "scale=2; $latency*1000" | bc 2>/dev/null)
-            if [ -z "$latency_ms" ]; then latency_ms="0"; fi
-
-            speed_bytes=$(curl -o /dev/null -s --max-time 5 --resolve speed.cloudflare.com:80:$ip -w "%{speed_download}" "http://speed.cloudflare.com/__down?bytes=10000000")
-            speed_mb=$(echo "scale=2; $speed_bytes/1024/1024" | bc 2>/dev/null)
-            if [ -z "$speed_mb" ]; then speed_mb="0"; fi
-
-            echo "$ip#$colo#${latency_ms}ms#${speed_mb}MB/s" >> cf_all.txt
-
-          done < raw_ips.txt
+          # 按速度排序（倒序）
+          sort -k4 -nr result_raw.txt | head -n 50 | while read ip colo latency speed; do
+            echo "$ip#$colo#${latency}ms#${speed}MB/s" >> cf_fast_top50.txt
+          done
 
       - name: Commit changes
         run: |
           if [ -n "$(git status --porcelain)" ]; then
             git config --local user.email "actions@github.com"
             git config --local user.name "GitHub Actions"
-            git add cf_all.txt
-            git commit -m "Update Cloudflare enhanced IP list"
+            git add cf_fast_top50.txt
+            git commit -m "Update Cloudflare Fast TOP50"
             git push
           fi
