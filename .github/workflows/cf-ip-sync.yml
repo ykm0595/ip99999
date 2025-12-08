@@ -21,51 +21,52 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y prips wireguard-tools jq bc iputils-ping
 
-      - name: Install wgcf (robust)
+      - name: Install wgcf (fixed version)
         run: |
-          RAW=$(curl -s -w "\n%{http_code}" https://api.github.com/repos/ViRb3/wgcf/releases)
-          BODY=$(echo "$RAW" | sed '$d')
-          CODE=$(echo "$RAW" | tail -n1)
-          if [ "$CODE" -ne 200 ]; then echo "WGCF API error"; exit 1; fi
-          WGCF_URL=$(echo "$BODY" | jq -r 'map(.assets // []) | flatten | map(select(.name | test("linux.*amd64";"i"))) | first | .browser_download_url // empty')
-          if [ -z "$WGCF_URL" ]; then echo "WGCF asset missing"; exit 1; fi
-          wget -O wgcf "$WGCF_URL"
+          wget -O wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.18/wgcf_2.2.18_linux_amd64
           chmod +x wgcf
           sudo mv wgcf /usr/local/bin/
 
-      - name: Install wireproxy (robust)
+      - name: Install wireproxy (fixed version)
         run: |
-          RAW=$(curl -s -w "\n%{http_code}" https://api.github.com/repos/whyvl/wireproxy/releases)
-          BODY=$(echo "$RAW" | sed '$d')
-          CODE=$(echo "$RAW" | tail -n1)
-          if [ "$CODE" -ne 200 ]; then echo "Wireproxy API error"; exit 1; fi
-          WIREPROXY_URL=$(echo "$BODY" | jq -r 'map(.assets // []) | flatten | map(select(.name | test("linux.*amd64";"i"))) | first | .browser_download_url // empty')
-          if [ -z "$WIREPROXY_URL" ]; then echo "Wireproxy asset missing"; exit 1; fi
-          wget -O wireproxy "$WIREPROXY_URL"
+          wget -O wireproxy https://github.com/whyvl/wireproxy/releases/download/v0.1.6/wireproxy-linux-amd64
           chmod +x wireproxy
           sudo mv wireproxy /usr/local/bin/
 
       - name: Setup WARP SOCKS5
         run: |
           set -e
+
+          rm -f wgcf-account.toml wgcf-profile.conf
+
           wgcf register --accept-tos
           wgcf generate
+
           PRIVATE_KEY=$(grep PrivateKey wgcf-profile.conf | head -n1 | awk '{print $3}')
           PUBLIC_KEY=$(grep PublicKey wgcf-profile.conf | head -n1 | awk '{print $3}')
+
           echo "[Interface]" > warp.conf
           echo "PrivateKey = $PRIVATE_KEY" >> warp.conf
           echo "Address = 172.16.0.2/32" >> warp.conf
+          echo "DNS = 1.1.1.1" >> warp.conf
+          echo "MTU = 1280" >> warp.conf
           echo "[Peer]" >> warp.conf
           echo "PublicKey = $PUBLIC_KEY" >> warp.conf
           echo "AllowedIPs = 0.0.0.0/0" >> warp.conf
           echo "Endpoint = engage.cloudflareclient.com:2408" >> warp.conf
+          echo "PersistentKeepalive = 25" >> warp.conf
           echo "[Socks5]" >> warp.conf
           echo "BindAddress = 127.0.0.1:40000" >> warp.conf
+
           nohup wireproxy -c warp.conf >/dev/null 2>&1 &
           sleep 5
+
           export ALL_PROXY="socks5://127.0.0.1:40000"
+
           if ! curl -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
-            echo "WARP failed"; exit 1; fi
+            echo "WARP failed"
+            exit 1
+          fi
 
       - name: Load previous valid IPs
         run: |
