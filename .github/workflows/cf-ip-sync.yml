@@ -5,7 +5,7 @@ permissions:
 
 on:
   schedule:
-    - cron: "0 18 * * *"
+    - cron: "0 18 * * *"     # 每天自动运行
   workflow_dispatch:
 
 jobs:
@@ -16,20 +16,23 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-           - name: Fetch CloudFlareYes API (托管版)
+      - name: Fetch CloudFlareYes API (托管稳定版)
         run: |
           mkdir -p /dev/shm/cfscan
+          echo "从托管 API 获取 JSON..."
           curl -s https://cfy-api.vercel.app/ -o /dev/shm/cfscan/api.json
 
-          echo "=== API 内容预览 ==="
-          head -n 20 /dev/shm/cfscan/api.json
-
+          echo "=== API 内容预览（前 20 行） ==="
+          head -n 20 /dev/shm/cfscan/api.json || true
 
       - name: Extract IP list
         run: |
+          echo "开始解析 JSON..."
           jq -r '.data[].ip' /dev/shm/cfscan/api.json | sort -u > /dev/shm/cfscan/ip_list.txt
+
           echo "提取到 $(wc -l < /dev/shm/cfscan/ip_list.txt) 个 IP"
-          head -n 20 /dev/shm/cfscan/ip_list.txt
+          echo "=== 前 20 个 IP ==="
+          head -n 20 /dev/shm/cfscan/ip_list.txt || true
 
       - name: Scan IPs (800 并发)
         run: |
@@ -78,6 +81,9 @@ jobs:
             printf "%s %s %s %s %s %s\n" "$ip" "$colo" "$latency_ms" "$speed_mb" "$loss" "$isp" >> '"$result"'
           '
 
+          echo "=== 原始测速结果前 20 行 ==="
+          head -n 20 "$result" || true
+
       - name: Sort and save results
         run: |
           result="/dev/shm/cfscan/result_raw.txt"
@@ -87,13 +93,16 @@ jobs:
             exit 0
           fi
 
+          echo "生成 TXT..."
           sort -k4 -nr $result | head -n 50 | awk \
             "{print \$1\"#\"\$2\"#\"\$3\"ms#\"\$4\"MB/s#loss=\"\$5\"#\"\$6}" \
             > cf_fast_top50.txt
 
+          echo "生成 CSV..."
           echo "ip,colo,latency_ms,speed_mb,loss,isp" > cf_fast_top50.csv
           sort -k4 -nr $result | head -n 50 >> cf_fast_top50.csv
 
+          echo "生成 JSON..."
           sort -k4 -nr $result | head -n 50 | awk '
             BEGIN { print "[" }
             {
@@ -103,6 +112,9 @@ jobs:
             }
             END { print "]" }
           ' > cf_fast_top50.json
+
+          echo "=== TXT 前 10 行 ==="
+          head -n 10 cf_fast_top50.txt || true
 
       - name: Commit changes
         run: |
