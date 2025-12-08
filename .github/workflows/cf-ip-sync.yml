@@ -23,30 +23,38 @@ jobs:
 
       - name: Install wgcf (auto latest) and wireproxy
         run: |
-          # 安装 wgcf（自动获取最新版本）
-          WGCF_VERSION=$(curl -s https://api.github.com/repos/ViRb3/wgcf/releases/latest | grep tag_name | cut -d '"' -f 4)
-          echo "最新 wgcf 版本：$WGCF_VERSION"
-          wget -O wgcf.tar.gz "https://github.com/ViRb3/wgcf/releases/download/${WGCF_VERSION}/wgcf_linux_amd64.tar.gz"
-          tar -xzf wgcf.tar.gz
-          sudo mv wgcf /usr/local/bin/
-          wgcf --version
+          # 自动解析 wgcf 最新下载链接
+          WGCF_URL=$(curl -s https://api.github.com/repos/ViRb3/wgcf/releases/latest \
+            | grep browser_download_url \
+            | grep linux_amd64 \
+            | head -n1 \
+            | cut -d '"' -f 4)
 
-          # 安装 wireproxy（同样用 latest）
-          WIREPROXY_DEB_URL=$(curl -s https://api.github.com/repos/octeep/wireproxy/releases/latest | grep browser_download_url | grep 'linux_amd64.deb' | head -n1 | cut -d '"' -f 4)
-          echo "wireproxy 下载地址：$WIREPROXY_DEB_URL"
-          wget -O wireproxy.deb "$WIREPROXY_DEB_URL"
+          echo "wgcf 下载地址：$WGCF_URL"
+
+          wget -O wgcf_latest "$WGCF_URL"
+          chmod +x wgcf_latest
+          sudo mv wgcf_latest /usr/local/bin/wgcf
+
+          # 安装 wireproxy（自动解析最新版本）
+          WIREPROXY_URL=$(curl -s https://api.github.com/repos/octeep/wireproxy/releases/latest \
+            | grep browser_download_url \
+            | grep linux_amd64.deb \
+            | head -n1 \
+            | cut -d '"' -f 4)
+
+          echo "wireproxy 下载地址：$WIREPROXY_URL"
+
+          wget -O wireproxy.deb "$WIREPROXY_URL"
           sudo dpkg -i wireproxy.deb
 
       - name: Generate WARP config and start SOCKS5 proxy
         run: |
-          # 注册并生成 WARP 配置
           wgcf register --accept-tos
           wgcf generate
 
-          # 确保 Endpoint 正确
           sed -i 's/^Endpoint.*/Endpoint = engage.cloudflareclient.com:2408/' wgcf-profile.conf
 
-          # 解析 wgcf-profile.conf 内容
           PRIVATE_KEY=$(grep -m1 "^PrivateKey" wgcf-profile.conf | awk '{print $3}')
           PUBLIC_KEY=$(grep -m1 "^PublicKey" wgcf-profile.conf | awk '{print $3}')
           ENDPOINT=$(grep -m1 "^Endpoint" wgcf-profile.conf | awk '{print $3}')
@@ -65,27 +73,21 @@ jobs:
           BindAddress = 127.0.0.1:40000
           EOF
 
-          # 启动 wireproxy（WARP SOCKS5）
           nohup wireproxy -c warp-socks5.conf >/dev/null 2>&1 &
           sleep 5
-          echo "WARP SOCKS5 已启动在 127.0.0.1:40000"
 
-          # 简单验证：看下出口 IP
           export ALL_PROXY="socks5://127.0.0.1:40000"
           echo "WARP 出口 IP："
-          curl -s https://www.cloudflare.com/cdn-cgi/trace | grep "ip=" || true
+          curl -s https://www.cloudflare.com/cdn-cgi/trace | grep ip=
 
       - name: Load previous valid IPs
         run: |
           mkdir -p /dev/shm/cfscan
           if [ -f valid_ips.txt ]; then
-            echo "检测到历史有效 IP，优先使用"
             cp valid_ips.txt /dev/shm/cfscan/valid_old.txt
-          else
-            echo "没有历史有效 IP，将进行全量随机抽样"
           fi
 
-      - name: Prepare region CIDRs (HKG / JPN / KOR)
+      - name: Prepare region CIDRs
         run: |
           cat <<EOF > /dev/shm/cfscan/cidrs.txt
           # Hong Kong
@@ -108,19 +110,14 @@ jobs:
           > /dev/shm/cfscan/ip_list.txt
 
           if [ -f /dev/shm/cfscan/valid_old.txt ]; then
-            echo "从历史有效 IP 中抽样 2000 个"
             cut -d '#' -f1 /dev/shm/cfscan/valid_old.txt | shuf -n 2000 >> /dev/shm/cfscan/ip_list.txt
           else
-            echo "从 CIDR 每段随机抽样 2048 个 IP"
             while read cidr; do
               [[ "$cidr" =~ ^# ]] && continue
               [[ -z "$cidr" ]] && continue
               prips "$cidr" | shuf -n 2048 >> /dev/shm/cfscan/ip_list.txt
             done < /dev/shm/cfscan/cidrs.txt
           fi
-
-          echo "最终扫描 IP 数量：$(wc -l < /dev/shm/cfscan/ip_list.txt)"
-          head -n 20 /dev/shm/cfscan/ip_list.txt || true
 
       - name: Scan IPs via WARP SOCKS5
         run: |
@@ -129,18 +126,13 @@ jobs:
 
           export ALL_PROXY="socks5://127.0.0.1:40000"
 
-          echo "开始测速（经 WARP 出口）..."
-
           cat /dev/shm/cfscan/ip_list.txt | xargs -n 1 -P 400 -I {} sh -c '
             ip="{}"
 
-            # 获取 colo
             trace=$(curl -s --max-time 0.8 --resolve speed.cloudflare.com:80:$ip http://speed.cloudflare.com/cdn-cgi/trace)
             colo=$(printf "%s\n" "$trace" | grep "^colo=" | cut -d= -f2)
-
             [ -z "$colo" ] && exit 0
 
-            # 测 RTT
             latency=$(curl -o /dev/null -s --max-time 0.8 \
               --resolve speed.cloudflare.com:80:$ip \
               -w "%{time_connect}" http://speed.cloudflare.com/cdn-cgi/trace)
@@ -148,21 +140,15 @@ jobs:
             latency_ms=$(echo "$latency*1000" | bc 2>/dev/null)
             [ -z "$latency_ms" ] && latency_ms="9999"
 
-            # 延迟过滤：>=200ms 丢弃
-            if (( $(echo "$latency_ms >= 200" | bc -l) )); then
-              exit 0
-            fi
+            if (( $(echo "$latency_ms >= 200" | bc -l) )); then exit 0; fi
 
             printf "%s %s %s\n" "$ip" "$colo" "$latency_ms" >> '"$result"'
           '
 
-          echo "原始有效结果行数：$(wc -l < "$result")"
-          head -n 20 "$result" || true
-
-      - name: Save valid IPs for next run (IP#Region)
+      - name: Save valid IPs (IP#Region)
         run: |
           if [ ! -s /dev/shm/cfscan/result_raw.txt ]; then
-            echo "没有扫描到任何有效 IP，保持原有 valid_ips.txt（若存在）"
+            echo "没有有效 IP"
             exit 0
           fi
 
@@ -173,17 +159,12 @@ jobs:
             print ip "#" upper
           }' /dev/shm/cfscan/result_raw.txt > valid_ips.txt
 
-          echo "有效 IP 数量：$(wc -l < valid_ips.txt)"
-          head -n 20 valid_ips.txt || true
-
       - name: Commit changes
         run: |
           if [ -n "$(git status --porcelain)" ]; then
             git config --local user.email "actions@github.com"
             git config --local user.name "GitHub Actions"
             git add valid_ips.txt
-            git commit -m "Update valid IPs (WARP wgcf)"
+            git commit -m "Update valid IPs (WARP wgcf auto URL)"
             git push
-          else
-            echo "没有变化，无需提交"
           fi
