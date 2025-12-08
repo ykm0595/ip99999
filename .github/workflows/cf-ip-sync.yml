@@ -16,10 +16,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install base dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y prips wireguard-tools jq bc iputils-ping
+          sudo apt-get install -y prips wireguard-tools jq bc iputils-ping unzip golang
 
       - name: Install wgcf (fixed version)
         run: |
@@ -27,12 +27,19 @@ jobs:
           chmod +x wgcf
           sudo mv wgcf /usr/local/bin/
 
-      - name: Install wireproxy (octeep v1.0.6)
+      - name: Install wireproxy (build from Cloudflare Go mirror)
         run: |
-          wget https://github.com/octeep/wireproxy/releases/download/v1.0.6/wireproxy_1.0.6_linux_amd64.tar.gz
-          tar -xzf wireproxy_1.0.6_linux_amd64.tar.gz
+          set -e
+          # 使用 Go 模块镜像下载源码（proxy.golang.org 是 Cloudflare 托管）
+          mkdir -p ~/go-wp
+          cd ~/go-wp
+          wget https://proxy.golang.org/github.com/octeep/wireproxy/@v/v1.0.6.zip -O wireproxy_v1.0.6.zip
+          unzip wireproxy_v1.0.6.zip
+          cd github.com/octeep/wireproxy@v1.0.6
+          go build -o wireproxy ./cmd/wireproxy
           sudo mv wireproxy /usr/local/bin/
           chmod +x /usr/local/bin/wireproxy
+          wireproxy -v || true
 
       - name: Setup 8 WARP SOCKS5 proxies
         run: |
