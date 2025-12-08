@@ -16,6 +16,11 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Install prips
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y prips
+
       - name: Prepare region CIDRs (HKG / ICN / NRT)
         run: |
           mkdir -p /dev/shm/cfscan
@@ -38,7 +43,7 @@ jobs:
           echo "=== 扫描 CIDR 列表 ==="
           cat /dev/shm/cfscan/cidrs.txt
 
-      - name: Expand CIDRs to IP list
+      - name: Expand CIDRs using prips
         run: |
           echo "开始展开 IP 段..."
           > /dev/shm/cfscan/ip_list.txt
@@ -47,22 +52,7 @@ jobs:
             [[ "$cidr" =~ ^# ]] && continue
             [[ -z "$cidr" ]] && continue
 
-            ipcalc -n $cidr | grep Network | awk '{print $2}' > /dev/shm/cfscan/net.txt
-            ipcalc -b $cidr | grep Broadcast | awk '{print $2}' > /dev/shm/cfscan/bc.txt
-
-            net=$(cat /dev/shm/cfscan/net.txt)
-            bc=$(cat /dev/shm/cfscan/bc.txt)
-
-            IFS=. read -r n1 n2 n3 n4 <<< "$net"
-            IFS=. read -r b1 b2 b3 b4 <<< "$bc"
-
-            start=$(( (n1<<24) + (n2<<16) + (n3<<8) + n4 ))
-            end=$(( (b1<<24) + (b2<<16) + (b3<<8) + b4 ))
-
-            for ((i=start; i<=end; i++)); do
-              ip="$(( (i>>24)&255 )).$(( (i>>16)&255 )).$(( (i>>8)&255 )).$(( i&255 ))"
-              echo $ip >> /dev/shm/cfscan/ip_list.txt
-            done
+            prips $cidr >> /dev/shm/cfscan/ip_list.txt
           done < /dev/shm/cfscan/cidrs.txt
 
           echo "展开完成，共 $(wc -l < /dev/shm/cfscan/ip_list.txt) 个 IP"
