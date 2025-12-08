@@ -21,12 +21,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y prips wireguard-tools jq bc iputils-ping unzip
 
-      - name: Install wgcf (fixed version)
-        run: |
-          wget -O wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.18/wgcf_2.2.18_linux_amd64
-          chmod +x wgcf
-          sudo mv wgcf /usr/local/bin/
-
       - name: Install sing-box (official binary)
         run: |
           wget https://github.com/SagerNet/sing-box/releases/download/v1.10.0/sing-box-1.10.0-linux-amd64.tar.gz
@@ -34,50 +28,26 @@ jobs:
           sudo mv sing-box-1.10.0-linux-amd64/sing-box /usr/local/bin/
           chmod +x /usr/local/bin/sing-box
 
-      - name: Setup WARP WireGuard + sing-box SOCKS5
+      - name: Setup WARP WireGuard + sing-box SOCKS5 (from secret)
+        env:
+          WARP_WG_CONF: ${{ secrets.WARP_WG_CONF }}
         run: |
           set -e
 
-          # 只清理本轮生成的配置，不要删账号文件
-          rm -f wgcf-profile.conf wgcf.conf config.json
-
-          # 若存在账号文件，直接复用；若不存在才尝试 register
-          if [ -f wgcf-account.toml ]; then
-            echo "wgcf-account.toml exists, skip register and reuse existing account."
-          else
-            echo "No existing wgcf account, start register with retry..."
-            try=0
-            max_try=5
-            while [ $try -lt $max_try ]; do
-              if wgcf register --accept-tos; then
-                echo "wgcf register success"
-                break
-              else
-                try=$((try+1))
-                echo "wgcf register failed (try $try/$max_try), sleep 5s and retry..."
-                sleep 5
-              fi
-            done
-
-            if [ $try -ge $max_try ]; then
-              echo "wgcf register failed after $max_try retries, abort."
-              exit 1
-            fi
+          if [ -z "$WARP_WG_CONF" ]; then
+            echo "WARP_WG_CONF secret is empty, abort."
+            exit 1
           fi
 
-          # 生成 WireGuard 配置
-          wgcf generate
+          echo "$WARP_WG_CONF" > wgcf.conf
+          sed -i 's/MTU.*/MTU = 1280/' wgcf.conf || true
 
-          mv wgcf-profile.conf wgcf.conf
-          sed -i 's/MTU.*/MTU = 1280/' wgcf.conf
-
-          # 启动 WireGuard 接口
           sudo wg-quick up ./wgcf.conf
 
-          PRIVATE_KEY=$(grep PrivateKey wgcf.conf | head -n1 | awk '{print $3}')
-          PUBLIC_KEY=$(grep PublicKey wgcf.conf | head -n1 | awk '{print $3}')
+          PRIVATE_KEY=$(grep -m1 "^PrivateKey" wgcf.conf | awk '{print $3}')
+          PUBLIC_KEY=$(grep -m1 "^PublicKey" wgcf.conf | awk '{print $3}')
+          ADDR=$(grep -m1 "^Address" wgcf.conf | awk '{print $3}')
 
-          # 生成 sing-box 配置
           cat > config.json <<EOF
           {
             "log": {
@@ -95,7 +65,7 @@ jobs:
                 "type": "wireguard",
                 "server": "engage.cloudflareclient.com",
                 "server_port": 2408,
-                "local_address": ["172.16.0.2/32"],
+                "local_address": ["${ADDR}"],
                 "private_key": "${PRIVATE_KEY}",
                 "peer_public_key": "${PUBLIC_KEY}",
                 "mtu": 1280
@@ -107,7 +77,6 @@ jobs:
           nohup sing-box run -c config.json >/dev/null 2>&1 &
           sleep 5
 
-          # 验证 WARP 是否真正透过 socks5 生效
           export ALL_PROXY="socks5://127.0.0.1:40000"
           if ! curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
             echo "WARP via sing-box failed"
@@ -225,8 +194,8 @@ jobs:
         run: |
           if [ -n "$(git status --porcelain)" ]; then
             git config --local user.email "actions@github.com"
-            git.config --local user.name "GitHub Actions"
-            git.add .
-            git.commit -m "Update CF IP scan results"
-            git.push
+            git config --local user.name "GitHub Actions"
+            git add .
+            git commit -m "Update CF IP scan results"
+            git push
           fi
