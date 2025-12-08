@@ -21,9 +21,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y prips wireguard-tools jq bc iputils-ping
 
-      #######################################################################
-      # ✅ 防呆版 wgcf 安装（HTTP code 检查 + assets 防空）
-      #######################################################################
       - name: Install wgcf (robust)
         run: |
           echo "===> Fetching wgcf releases..."
@@ -32,7 +29,7 @@ jobs:
           CODE=$(echo "$RAW" | tail -n1)
 
           if [ "$CODE" -ne 200 ]; then
-            echo "❌ GitHub API error: $CODE"
+            echo "GitHub API error for wgcf: $CODE"
             echo "$BODY"
             exit 1
           fi
@@ -46,19 +43,16 @@ jobs:
           ')
 
           if [ -z "$WGCF_URL" ]; then
-            echo "❌ wgcf linux_amd64 asset not found"
+            echo "wgcf linux_amd64 asset not found"
             echo "$BODY" | head -n 40
             exit 1
           fi
 
-          echo "✅ WGCF URL: $WGCF_URL"
+          echo "WGCF URL: $WGCF_URL"
           wget -O wgcf "$WGCF_URL"
           chmod +x wgcf
           sudo mv wgcf /usr/local/bin/
 
-      #######################################################################
-      # ✅ 防呆版 wireproxy 安装（assets 防空 + 正则匹配）
-      #######################################################################
       - name: Install wireproxy (robust)
         run: |
           echo "===> Fetching wireproxy releases..."
@@ -67,7 +61,7 @@ jobs:
           CODE=$(echo "$RAW" | tail -n1)
 
           if [ "$CODE" -ne 200 ]; then
-            echo "❌ GitHub API error: $CODE"
+            echo "GitHub API error for wireproxy: $CODE"
             echo "$BODY"
             exit 1
           fi
@@ -81,19 +75,16 @@ jobs:
           ')
 
           if [ -z "$WIREPROXY_URL" ]; then
-            echo "❌ wireproxy linux_amd64 asset not found"
+            echo "wireproxy linux_amd64 asset not found"
             echo "$BODY" | head -n 40
             exit 1
           fi
 
-          echo "✅ Wireproxy URL: $WIREPROXY_URL"
+          echo "Wireproxy URL: $WIREPROXY_URL"
           wget -O wireproxy "$WIREPROXY_URL"
           chmod +x wireproxy
           sudo mv wireproxy /usr/local/bin/
 
-      #######################################################################
-      # ✅ WARP 启动 + socks5 强制自检（不通过直接 exit）
-      #######################################################################
       - name: Setup WARP SOCKS5
         run: |
           set -e
@@ -123,18 +114,15 @@ EOF
 
           export ALL_PROXY="socks5://127.0.0.1:40000"
 
-          echo "===> Testing WARP..."
+          echo "Testing WARP..."
           if ! curl -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp="; then
-            echo "❌ ERROR: WARP socks5 proxy is NOT working"
+            echo "ERROR: WARP socks5 proxy is NOT working"
             curl -v --max-time 5 https://www.cloudflare.com/cdn-cgi/trace || true
             exit 1
           fi
 
-          echo "✅ WARP is working"
+          echo "WARP is working"
 
-      #######################################################################
-      # ✅ 加载旧 IP
-      #######################################################################
       - name: Load previous valid IPs
         run: |
           mkdir -p /dev/shm/cfscan
@@ -142,9 +130,6 @@ EOF
             cp valid_ips.txt /dev/shm/cfscan/valid_old.txt
           fi
 
-      #######################################################################
-      # ✅ Cloudflare IP 段
-      #######################################################################
       - name: Prepare CIDRs
         run: |
           cat > /dev/shm/cfscan/cidrs.txt <<EOF
@@ -158,9 +143,6 @@ EOF
 172.68.0.0/14
 EOF
 
-      #######################################################################
-      # ✅ 构建 IP 列表
-      #######################################################################
       - name: Build IP list
         run: |
           > /dev/shm/cfscan/ip_list.txt
@@ -173,9 +155,6 @@ EOF
             done < /dev/shm/cfscan/cidrs.txt
           fi
 
-      #######################################################################
-      # ✅ 扫描（带防呆）
-      #######################################################################
       - name: Scan IPs
         run: |
           result="/dev/shm/cfscan/result_raw.txt"
@@ -208,18 +187,12 @@ EOF
             echo "$ip $colo $latency_ms $speed_mb" >> "'"$result"'"
           '
 
-      #######################################################################
-      # ✅ 排序 + Top20
-      #######################################################################
       - name: Sort + Top20
         run: |
           sort -k3,3n -k4,4nr /dev/shm/cfscan/result_raw.txt > valid_ips_full.txt
           head -n 20 valid_ips_full.txt > top20.txt
           awk '{print $1"#"toupper($2)}' valid_ips_full.txt > valid_ips.txt
 
-      #######################################################################
-      # ✅ stats
-      #######################################################################
       - name: Generate stats
         run: |
           total=$(wc -l < valid_ips_full.txt)
@@ -233,9 +206,6 @@ EOF
           echo "NRT：$nrt" >> stats.txt
           echo "ICN：$icn" >> stats.txt
 
-      #######################################################################
-      # ✅ history
-      #######################################################################
       - name: Save history
         run: |
           mkdir -p history
@@ -247,9 +217,6 @@ EOF
             '{date:$date,total:$total,top20:$top20}' \
             > history/$ts.json
 
-      #######################################################################
-      # ✅ 自动提交
-      #######################################################################
       - name: Commit changes
         run: |
           if [ -n "$(git status --porcelain)" ]; then
