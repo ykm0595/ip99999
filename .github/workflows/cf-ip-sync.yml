@@ -1,249 +1,60 @@
-name: Cloudflare-Region-Random-Scanner-WARP
-
-permissions:
-  contents: write
+name: test-warp
 
 on:
-  schedule:
-    - cron: "0 18 * * *"
   workflow_dispatch:
 
 jobs:
-  scan:
+  test:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y prips wireguard-tools jq bc iputils-ping
+          sudo apt-get install -y wireguard-tools jq
 
-      - name: Install wgcf and wireproxy (auto latest)
+      - name: Install wgcf
         run: |
-          # 安装 wgcf（自动解析 URL）
-          WGCF_URL=$(curl -s https://api.github.com/repos/ViRb3/wgcf/releases/latest \
-            | grep browser_download_url \
-            | grep linux_amd64 \
-            | head -n1 \
-            | cut -d '"' -f 4)
-          echo "wgcf 下载地址：$WGCF_URL"
-          wget -O wgcf_latest "$WGCF_URL"
-          chmod +x wgcf_latest
-          sudo mv wgcf_latest /usr/local/bin/wgcf
-          wgcf --version || true
+          WGCF_URL=$(curl -s https://api.github.com/repos/ViRb3/wgcf/releases/latest | jq -r '.assets[0].browser_download_url')
+          wget -O wgcf "$WGCF_URL"
+          chmod +x wgcf
+          sudo mv wgcf /usr/local/bin/
 
-          # 安装 wireproxy（自动解析 .deb）
-          WIREPROXY_URL=$(curl -s https://api.github.com/repos/octeep/wireproxy/releases/latest \
-            | grep browser_download_url \
-            | grep '\.deb' \
-            | head -n1 \
-            | cut -d '"' -f 4)
-          echo "wireproxy 下载地址：$WIREPROXY_URL"
+      - name: Install wireproxy
+        run: |
+          WIREPROXY_URL=$(curl -s https://api.github.com/repos/octeep/wireproxy/releases/latest | jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url')
           wget -O wireproxy.deb "$WIREPROXY_URL"
           sudo dpkg -i wireproxy.deb || sudo apt-get -f install -y
 
-      - name: Generate WARP config and start SOCKS5
+      - name: Setup WARP
         run: |
           wgcf register --accept-tos
           wgcf generate
 
-          sed -i 's/^Endpoint.*/Endpoint = engage.cloudflareclient.com:2408/' wgcf-profile.conf
+          PRIVATE_KEY=$(grep PrivateKey wgcf-profile.conf | head -n1 | awk '{print $3}')
+          PUBLIC_KEY=$(grep PublicKey wgcf-profile.conf | head -n1 | awk '{print $3}')
 
-          PRIVATE_KEY=$(grep -m1 "^PrivateKey" wgcf-profile.conf | awk '{print $3}')
-          PUBLIC_KEY=$(grep -m1 "^PublicKey" wgcf-profile.conf | awk '{print $3}')
-          ENDPOINT=$(grep -m1 "^Endpoint" wgcf-profile.conf | awk '{print $3}')
-
-          cat > warp-socks5.conf <<EOF
+          cat > warp.conf <<EOF
 [Interface]
-PrivateKey = ${PRIVATE_KEY}
+PrivateKey = $PRIVATE_KEY
 Address = 172.16.0.2/32
 
 [Peer]
-PublicKey = ${PUBLIC_KEY}
-AllowedIPs = 0.0.0.0/0, ::/0
-Endpoint = ${ENDPOINT}
+PublicKey = $PUBLIC_KEY
+AllowedIPs = 0.0.0.0/0
+Endpoint = engage.cloudflareclient.com:2408
 
 [Socks5]
 BindAddress = 127.0.0.1:40000
 EOF
 
-          nohup wireproxy -c warp-socks5.conf >/dev/null 2>&1 &
+          nohup wireproxy -c warp.conf >/dev/null 2>&1 &
           sleep 5
 
+      - name: Test WARP
+        run: |
           export ALL_PROXY="socks5://127.0.0.1:40000"
-          echo "WARP 出口 IP："
-          curl -s https://www.cloudflare.com/cdn-cgi/trace | grep ip= || true
-
-      - name: Load previous valid IPs
-        run: |
-          mkdir -p /dev/shm/cfscan
-          if [ -f valid_ips.txt ]; then
-            cp valid_ips.txt /dev/shm/cfscan/valid_old.txt
-          fi
-
-      - name: Prepare region CIDRs
-        run: |
-          cat > /dev/shm/cfscan/cidrs.txt <<EOF
-# Hong Kong
-104.16.0.0/13
-104.24.0.0/14
-172.64.0.0/15
-
-# Japan
-141.101.64.0/18
-188.114.96.0/20
-198.41.128.0/17
-
-# Korea
-162.158.0.0/16
-172.68.0.0/14
-EOF
-
-      - name: Build IP list
-        run: |
-          > /dev/shm/cfscan/ip_list.txt
-
-          if [ -f /dev/shm/cfscan/valid_old.txt ]; then
-            echo "从历史有效 IP 中抽样 2000 个"
-            cut -d '#' -f1 /dev/shm/cfscan/valid_old.txt | shuf -n 2000 >> /dev/shm/cfscan/ip_list.txt
-          else
-            echo "首次扫描，从 CIDR 每段抽样 2048 个"
-            while read cidr; do
-              case "$cidr" in
-                \#*|"") continue ;;
-              esac
-              prips "$cidr" | shuf -n 2048 >> /dev/shm/cfscan/ip_list.txt
-            done < /dev/shm/cfscan/cidrs.txt
-          fi
-
-          echo "最终扫描 IP 数量：$(wc -l < /dev/shm/cfscan/ip_list.txt)"
-          head -n 20 /dev/shm/cfscan/ip_list.txt || true
-
-      - name: Scan IPs via WARP SOCKS5
-        run: |
-          result="/dev/shm/cfscan/result_raw.txt"
-          : > "$result"
-
-          export ALL_PROXY="socks5://127.0.0.1:40000"
-
-          echo "开始测速（RTT + Speed + Loss）..."
-
-          cat /dev/shm/cfscan/ip_list.txt | xargs -n 1 -P 250 -I {} bash -c '
-            ip="{}"
-
-            trace=$(curl -s --max-time 1 --resolve speed.cloudflare.com:80:$ip http://speed.cloudflare.com/cdn-cgi/trace)
-            colo=$(printf "%s\n" "$trace" | grep "^colo=" | cut -d= -f2)
-            [ -z "$colo" ] && exit 0
-
-            latency=$(curl -o /dev/null -s --max-time 1 \
-              --resolve speed.cloudflare.com:80:$ip \
-              -w "%{time_connect}" http://speed.cloudflare.com/cdn-cgi/trace)
-            latency_ms=$(echo "$latency*1000" | bc 2>/dev/null)
-            [ -z "$latency_ms" ] && latency_ms="9999"
-
-            if (( $(echo "$latency_ms >= 200" | bc -l) )); then exit 0; fi
-
-            loss=$(ping -c 3 -W 1 $ip 2>/dev/null | grep "packet loss" | awk -F% "{print \$1}" | awk "{print \$NF}")
-            [ -z "$loss" ] && loss=100
-            if (( $(echo "$loss > 50" | bc -l) )); then exit 0; fi
-
-            speed_bytes=$(curl -o /dev/null -s --max-time 1 \
-              --resolve speed.cloudflare.com:80:$ip \
-              -w "%{speed_download}" \
-              "http://speed.cloudflare.com/__down?bytes=524288")
-            speed_mb=$(echo "$speed_bytes/1024/1024" | bc 2>/dev/null)
-            [ -z "$speed_mb" ] && speed_mb="0"
-
-            printf "%s %s %s %s %s\n" "$ip" "$colo" "$latency_ms" "$speed_mb" "$loss" >> "'"$result"'"
-          '
-
-          echo "原始有效结果行数：$(wc -l < "$result")"
-          head -n 20 "$result" || true
-
-      - name: Sort results and build Top20
-        run: |
-          if [ ! -s /dev/shm/cfscan/result_raw.txt ]; then
-            echo "没有有效结果"
-            exit 0
-          fi
-
-          sort -k3,3n -k4,4nr /dev/shm/cfscan/result_raw.txt > valid_ips_full.txt
-
-          head -n 20 valid_ips_full.txt > top20.txt
-
-          awk '{print $1"#"toupper($2)}' valid_ips_full.txt > valid_ips.txt
-
-      - name: Generate stats.txt
-        run: |
-          total=$(wc -l < valid_ips_full.txt)
-          hkg=$(grep -i " hkg " valid_ips_full.txt | wc -l)
-          nrt=$(grep -i " nrt " valid_ips_full.txt | wc -l)
-          icn=$(grep -i " icn " valid_ips_full.txt | wc -l)
-
-          min_rtt=$(awk 'NR==1{print $3}' valid_ips_full.txt)
-          median_rtt=$(awk '{print $3}' valid_ips_full.txt | sort -n | awk '{a[NR]=$1} END{if(NR%2==1)print a[(NR+1)/2]; else print (a[NR/2]+a[NR/2+1])/2}')
-
-          max_speed=$(awk 'NR==1{print $4}' valid_ips_full.txt)
-
-          cat > stats.txt <<EOF
-日期：$(date -u +"%Y-%m-%d %H:%M UTC")
-有效 IP 总数：$total
-
-区域分布：
-  HKG：$hkg
-  NRT：$nrt
-  ICN：$icn
-
-RTT：
-  最低 RTT：${min_rtt} ms
-  中位 RTT：${median_rtt} ms
-
-速度：
-  最高速度：${max_speed} MB/s
-
-Top20 已生成：top20.txt
-EOF
-
-          cat stats.txt
-
-      - name: Save history JSON
-        run: |
-          mkdir -p history
-          ts=$(date -u +"%Y-%m-%d")
-          top20_array=$(jq -R -s -c 'split("\n")[:-1]' top20.txt)
-
-          jq -n \
-            --arg date "$(date -u +"%Y-%m-%d %H:%M UTC")" \
-            --arg total "$(wc -l < valid_ips_full.txt)" \
-            --arg hkg "$(grep -i ' hkg ' valid_ips_full.txt | wc -l)" \
-            --arg nrt "$(grep -i ' nrt ' valid_ips_full.txt | wc -l)" \
-            --arg icn "$(grep -i ' icn ' valid_ips_full.txt | wc -l)" \
-            --argjson top20 "$top20_array" \
-            '{
-              date: $date,
-              total: ($total|tonumber),
-              region: {
-                HKG: ($hkg|tonumber),
-                NRT: ($nrt|tonumber),
-                ICN: ($icn|tonumber)
-              },
-              top20: $top20
-            }' > history/$ts.json
-
-          echo "history/$ts.json 已生成"
-          cat history/$ts.json
-
-      - name: Commit changes
-        run: |
-          if [ -n "$(git status --porcelain)" ]; then
-            git config --local user.email "actions@github.com"
-            git config --local user.name "GitHub Actions"
-            git add valid_ips.txt valid_ips_full.txt top20.txt stats.txt history/
-            git commit -m "Update results (Top20 + stats + history)"
-            git push
-          else
-            echo "没有变化，无需提交"
-          fi
+          curl -s https://www.cloudflare.com/cdn-cgi/trace
