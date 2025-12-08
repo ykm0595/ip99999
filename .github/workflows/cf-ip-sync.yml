@@ -5,7 +5,7 @@ permissions:
 
 on:
   schedule:
-    - cron: "0 18 * * *"   # 每天 UTC 18 点（北京时间次日 02:00）
+    - cron: "0 18 * * *"
   workflow_dispatch:
 
 jobs:
@@ -23,18 +23,24 @@ jobs:
 
       - name: Install wgcf and wireproxy (auto latest)
         run: |
-          # wgcf
+          # 安装 wgcf（自动解析 URL）
           WGCF_URL=$(curl -s https://api.github.com/repos/ViRb3/wgcf/releases/latest \
-            | jq -r '.assets[] | select(.name | contains("linux_amd64")) | .browser_download_url')
+            | grep browser_download_url \
+            | grep linux_amd64 \
+            | head -n1 \
+            | cut -d '"' -f 4)
           echo "wgcf 下载地址：$WGCF_URL"
           wget -O wgcf_latest "$WGCF_URL"
           chmod +x wgcf_latest
           sudo mv wgcf_latest /usr/local/bin/wgcf
           wgcf --version || true
 
-          # wireproxy
+          # 安装 wireproxy（自动解析 .deb）
           WIREPROXY_URL=$(curl -s https://api.github.com/repos/octeep/wireproxy/releases/latest \
-            | jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url')
+            | grep browser_download_url \
+            | grep '\.deb' \
+            | head -n1 \
+            | cut -d '"' -f 4)
           echo "wireproxy 下载地址：$WIREPROXY_URL"
           wget -O wireproxy.deb "$WIREPROXY_URL"
           sudo dpkg -i wireproxy.deb || sudo apt-get -f install -y
