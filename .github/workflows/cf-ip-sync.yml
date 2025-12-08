@@ -1,11 +1,11 @@
-name: Cloudflare-Smart-Scanner
+name: Cloudflare-Ultimate-Scanner
 
 permissions:
   contents: write
 
 on:
   schedule:
-    - cron: "0 18 * * *"        # 每天扫描（只扫描有效 IP）
+    - cron: "0 18 * * *"        # 每天扫描有效 IP
     - cron: "0 18 * * 0"        # 每周日全量扫描
   workflow_dispatch:
 
@@ -21,53 +21,60 @@ jobs:
         run: |
           mkdir -p /dev/shm/cfscan
 
-          # 如果存在 cf_valid.txt，则只扫描有效 IP
           if [ -f cf_valid.txt ]; then
-            echo "使用上次的有效 IP 列表"
+            echo "使用上次有效 IP 列表"
             cp cf_valid.txt /dev/shm/cfscan/ip_list.txt
           else
             echo "首次运行：生成全量 IP 列表"
             ipfile="/dev/shm/cfscan/ip_list.txt"
             echo "" > $ipfile
 
-            # 162.159.0.0/16
             for i in {0..255}; do
               for j in {0..255}; do
                 echo "162.159.$i.$j" >> $ipfile
-              done
-            done
-
-            # 172.64.0.0/16
-            for i in {0..255}; do
-              for j in {0..255}; do
                 echo "172.64.$i.$j" >> $ipfile
               done
             done
           fi
 
-      - name: Scan IPs (2000 并发)
+      - name: Scan IPs (800 并发 · 稳定版)
         run: |
           result="/dev/shm/cfscan/result_raw.txt"
           echo "" > $result
 
-          scan_ip() {
-            ip=$1
+          cat /dev/shm/cfscan/ip_list.txt | xargs -n 1 -P 800 -I {} sh -c '
+            ip="{}"
 
             # 节点检测
             colo=$(curl -s --max-time 0.2 --resolve speed.cloudflare.com:80:$ip \
-              http://speed.cloudflare.com/cdn-cgi/trace | grep '^colo=' | cut -d= -f2)
-            [ -z "$colo" ] && return 0
+              http://speed.cloudflare.com/cdn-cgi/trace | grep "^colo=" | cut -d= -f2)
+
+            [ -z "$colo" ] && exit 0
+
+            # ✅ 节点过滤（只保留 HKG / SIN / NRT）
+            case "$colo" in
+              HKG|SIN|NRT) ;;
+              *) exit 0 ;;
+            esac
 
             # 延迟检测
             latency=$(curl -o /dev/null -s --max-time 0.2 \
               --resolve speed.cloudflare.com:80:$ip \
               -w "%{time_connect}" http://speed.cloudflare.com/cdn-cgi/trace)
+
             latency_ms=$(echo "$latency*1000" | bc 2>/dev/null)
             [ -z "$latency_ms" ] && latency_ms="9999"
 
-            # 延迟过滤
+            # ✅ 延迟过滤
             if (( $(echo "$latency_ms >= 200" | bc -l) )); then
-              return 0
+              exit 0
+            fi
+
+            # ✅ 丢包检测（轻量）
+            loss=$(ping -c 3 -W 1 $ip 2>/dev/null | grep "packet loss" | awk -F% "{print \$1}" | awk "{print \$NF}")
+            [ -z "$loss" ] && loss=100
+            if (( $(echo "$loss > 50" | bc -l) )); then
+              exit 0
             fi
 
             # 速度测试（512KB）
@@ -75,32 +82,49 @@ jobs:
               --resolve speed.cloudflare.com:80:$ip \
               -w "%{speed_download}" \
               "http://speed.cloudflare.com/__down?bytes=524288")
+
             speed_mb=$(echo "$speed_bytes/1024/1024" | bc 2>/dev/null)
             [ -z "$speed_mb" ] && speed_mb="0"
 
-            echo "$ip $colo $latency_ms $speed_mb" >> $result
-          }
+            # ✅ 运营商识别（GitHub Actions 无法真实判断 → unknown）
+            isp="unknown"
 
-          export -f scan_ip
-
-          cat /dev/shm/cfscan/ip_list.txt | xargs -n 1 -P 2000 bash -c 'scan_ip "$@"' _
+            printf "%s %s %s %s %s %s\n" "$ip" "$colo" "$latency_ms" "$speed_mb" "$loss" "$isp" >> '"$result"'
+          '
 
       - name: Sort and save results
         run: |
           result="/dev/shm/cfscan/result_raw.txt"
 
-          # 保存 TOP50
-          sort -k4 -nr $result | head -n 50 | awk '{print $1"#"$2"#"$3"ms#"$4"MB/s"}' > cf_fast_top50.txt
+          # TXT
+          sort -k4 -nr $result | head -n 50 | awk \
+            "{print \$1\"#\"\$2\"#\"\$3\"ms#\"\$4\"MB/s#loss=\"\$5\"#\"\$6}" \
+            > cf_fast_top50.txt
 
-          # 保存所有有效 IP（用于下次扫描）
-          awk '{print $1}' $result > cf_valid.txt
+          # CSV
+          echo "ip,colo,latency_ms,speed_mb,loss,isp" > cf_fast_top50.csv
+          sort -k4 -nr $result | head -n 50 >> cf_fast_top50.csv
+
+          # JSON
+          sort -k4 -nr $result | head -n 50 | awk '
+            BEGIN { print "[" }
+            {
+              printf "  {\"ip\":\"%s\",\"colo\":\"%s\",\"latency_ms\":%s,\"speed_mb\":%s,\"loss\":%s,\"isp\":\"%s\"}",
+                $1,$2,$3,$4,$5,$6
+              if (NR < 50) print ","; else print ""
+            }
+            END { print "]" }
+          ' > cf_fast_top50.json
+
+          # 保存有效 IP（用于下次扫描）
+          awk "{print \$1}" $result > cf_valid.txt
 
       - name: Commit changes
         run: |
           if [ -n "$(git status --porcelain)" ]; then
             git config --local user.email "actions@github.com"
             git config --local user.name "GitHub Actions"
-            git add cf_fast_top50.txt cf_valid.txt
-            git commit -m "Update Cloudflare Smart Scan"
+            git add cf_fast_top50.txt cf_fast_top50.csv cf_fast_top50.json cf_valid.txt
+            git commit -m "Update Cloudflare Ultimate Scan"
             git push
           fi
